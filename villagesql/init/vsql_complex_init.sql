@@ -87,3 +87,6 @@ CREATE TRIGGER vc2_bi BEFORE INSERT ON vc2 FOR EACH ROW
 
 CREATE TRIGGER vc1_au AFTER UPDATE ON vc1 FOR EACH ROW
   INSERT INTO vc_log (src, r, c) VALUES ('vc1_au', complex_real(NEW.c), NEW.c);
+
+-- Database for the lifecycle workers (conf/vsql_lifecycle.conf).
+CREATE DATABASE vlc;

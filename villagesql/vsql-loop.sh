@@ -10,6 +10,8 @@
 #                  answering, or pstress ran HANG_GRACE seconds past its time
 #   shutdown_hang  SIGNAL=15 shutdown took longer than SHUTDOWN_TIMEOUT
 #   recovery_*     restart after a kill/crash died or did not come up
+#   check_failed   CHECK_SQL, run after every restart, printed a FAIL line or
+#                  an error
 # Hangs get stack dumps (macOS: sample + lldb, Linux: gdb) and server state
 # before the server is killed with SIGABRT.
 #
@@ -23,6 +25,27 @@
 #   vsql_complex_ddl        custom-type index/column/partition DDL, rebuilds,
 #                           and dropping/recreating SPs, functions, triggers
 #   vsql_complex_lifecycle  INSTALL/UNINSTALL EXTENSION under load
+#   vsql_lifecycle          for LIFECYCLE_GRAMMAR: create, use and drop
+#                           vsql_simple and vsql_tvector objects, and
+#                           uninstall/install both extensions
+#   vsql_update_dml         DML, routines and prepared statements on columns
+#                           of the update_test, update_schema_test and
+#                           update_length_test types
+#   vsql_update_ddl         short-lived tables and routines of those types
+#   vsql_update_ext         ALTER EXTENSION ... VERSION ... AT RESTART to every
+#                           version, including ones the precheck rejects
+# conf/vsql_update.conf runs these with CHECK_SQL init/vsql_update_check.sql,
+# which verifies after every restart that the applied version is the one
+# columns and routine parameters render with.
+#   vsql_vector_dml         SVECTOR inserts through prepared statements, KNN on
+#                           L2/cosine/inner-product/L1 HNSW indexes with
+#                           ef_search changes, distance scans, SP/function/
+#                           trigger calls, and DML that HNSW tables reject
+#   vsql_vector_ddl         create/drop/truncate of HNSW tables, routine and
+#                           trigger re-creation; no ALTER TABLE
+#   vsql_vector_alter       ALTER TABLE, CREATE INDEX, OPTIMIZE, CHECK on HNSW
+#                           tables (crash today; opt in)
+# conf/vsql_vector.conf switches the init SQL, .veb and grammar to vsql_vector.
 #
 # Usage:  BASEDIR=<build dir> villagesql/vsql-loop.sh [config-file]
 # Any variable below can be set in the environment or in the config file.
@@ -48,6 +71,17 @@ GRAMMAR_WEIGHT=${GRAMMAR_WEIGHT:-1000}   # pstress DML weights sum to ~2600
 PSTRESS_TABLES=${PSTRESS_TABLES:-20}
 PSTRESS_RECORDS=${PSTRESS_RECORDS:-200}
 PSTRESS_EXTRA=${PSTRESS_EXTRA:-}
+# Lifecycle workers run beside pstress: each runs random batches of
+# LIFECYCLE_BATCH lines from LIFECYCLE_GRAMMAR, one short mysql session per
+# batch, so no session keeps an extension pinned. Empty = off.
+LIFECYCLE_GRAMMAR=${LIFECYCLE_GRAMMAR:-}
+LIFECYCLE_THREADS=${LIFECYCLE_THREADS:-2}
+LIFECYCLE_BATCH=${LIFECYCLE_BATCH:-10}
+# SQL file run after every restart. Lines it prints starting with FAIL, and
+# any error, are a finding; lines starting with INFO go to the loop log. A row
+# RENDER<tab>prefix<tab>label<tab>value is a finding unless value starts with
+# prefix.
+CHECK_SQL=${CHECK_SQL:-}
 MYEXTRA=${MYEXTRA:-}
 # Cycles mixing MDL and InnoDB row-lock waits are invisible to both deadlock
 # detectors and only break on these timeouts; long ones stall every thread.
@@ -67,6 +101,7 @@ ERR=$RUNDIR/mysqld.err
 LOG=$RUNDIR/loop.log
 MYSQLD_PID=
 PSTRESS_PID=
+LC_PIDS=
 TRIAL=0
 LIFE=0
 STEP=0
@@ -74,6 +109,7 @@ SEED=
 N_CRASH=0
 N_HANG=0
 N_RECOVERY=0
+N_CHECK=0
 
 log() { echo "$(date '+%H:%M:%S') $*" | tee -a "$LOG"; }
 die() { log "FATAL: $*"; stop_all; exit 1; }
@@ -106,6 +142,7 @@ server_alive() { [ -n "$MYSQLD_PID" ] && kill -0 "$MYSQLD_PID" 2>/dev/null; }
 err_size() { if [ -f "$ERR" ]; then wc -c < "$ERR" | tr -d ' '; else echo 0; fi; }
 
 stop_all() {
+  stop_lifecycle
   [ -n "$PSTRESS_PID" ] && kill -9 "$PSTRESS_PID" 2>/dev/null
   server_alive && kill -9 "$MYSQLD_PID" 2>/dev/null
   PSTRESS_PID=; MYSQLD_PID=
@@ -114,7 +151,7 @@ stop_all() {
 trap 'log "interrupted"; stop_all; summary; exit 130' INT TERM
 
 summary() {
-  log "trials=$TRIAL crashes=$N_CRASH hangs=$N_HANG recovery_failures=$N_RECOVERY"
+  log "trials=$TRIAL crashes=$N_CRASH hangs=$N_HANG recovery_failures=$N_RECOVERY check_failures=$N_CHECK"
 }
 
 # Initialize a template datadir once per mysqld binary.
@@ -210,6 +247,20 @@ save_finding() {
   log "  saved $dir"
 }
 
+# Concatenate grammar files "name[:N] ..." (N = repeat count) into $2.
+build_grammar() {
+  local f name times i
+  : > "$2"
+  for f in $1; do
+    name=${f%%:*}; times=1
+    [ "$name" != "$f" ] && times=${f#*:}
+    [ -f "$SCRIPT_DIR/grammar/$name.sql" ] || die "missing grammar $name"
+    for i in $(seq 1 "$times"); do
+      cat "$SCRIPT_DIR/grammar/$name.sql" >> "$2"
+    done
+  done
+}
+
 fresh_datadir() {
   stop_all
   LIFE=$((LIFE + 1)); STEP=0; SEED=$((RANDOM * 32768 + RANDOM))
@@ -220,16 +271,8 @@ fresh_datadir() {
   for f in $VEB_FILES; do
     cp "$BASEDIR/veb_output_directory/$f" "$RUNDIR/veb/" || die "missing $f in $BASEDIR/veb_output_directory"
   done
-  : > "$RUNDIR/life/grammar.sql"
-  local name times i
-  for f in $GRAMMAR; do
-    name=${f%%:*}; times=1
-    [ "$name" != "$f" ] && times=${f#*:}
-    [ -f "$SCRIPT_DIR/grammar/$name.sql" ] || die "missing grammar $name"
-    for i in $(seq 1 "$times"); do
-      cat "$SCRIPT_DIR/grammar/$name.sql" >> "$RUNDIR/life/grammar.sql"
-    done
-  done
+  build_grammar "$GRAMMAR" "$RUNDIR/life/grammar.sql"
+  [ -n "$LIFECYCLE_GRAMMAR" ] && build_grammar "$LIFECYCLE_GRAMMAR" "$RUNDIR/life/lifecycle.sql"
   start_server || die "fresh server did not start, see $ERR"
   run_timeout 30 "$MYSQL" -uroot -S "$SOCK" -e "CREATE DATABASE IF NOT EXISTS test" \
     || die "cannot create database test"
@@ -239,11 +282,33 @@ fresh_datadir() {
 }
 
 # Returns 0 when the server is up again.
+# Run CHECK_SQL against the restarted server; $1 is the error log offset of
+# the restart.
+run_check() {
+  [ -n "$CHECK_SQL" ] || return 0
+  local out="$RUNDIR/life/check_step_$STEP.out"
+  run_timeout 60 "$MYSQL" -uroot -S "$SOCK" -N --force -e "source $CHECK_SQL" > "$out" 2>&1
+  local rc=$?
+  awk -F'\t' '$1 == "RENDER" && index($4, $2) != 1 {
+    print "FAIL " $3 " renders as " $4 ", expected prefix " $2 }' "$out" >> "$out.fail"
+  cat "$out.fail" >> "$out"; rm -f "$out.fail"
+  local info; info=$(grep '^INFO ' "$out" | sed 's/^INFO //' | paste -sd ';' -)
+  [ -n "$info" ] && log "  check: $info"
+  if [ $rc -ne 0 ] || grep -q '^FAIL\|^ERROR' "$out"; then
+    N_CHECK=$((N_CHECK + 1))
+    local dir; dir=$(new_finding check_failed)
+    log "  CHECK FAILED:"
+    grep '^FAIL\|^ERROR' "$out" | head -5 | sed 's/^/    /' | tee -a "$LOG"
+    cp "$out" "$dir/"
+    save_finding "$dir" "$1"
+  fi
+}
+
 restart_for_recovery() {
   local err_off; err_off=$(err_size)
   start_server
   local rc=$?
-  [ $rc -eq 0 ] && return 0
+  [ $rc -eq 0 ] && { run_check "$err_off"; return 0; }
   N_RECOVERY=$((N_RECOVERY + 1))
   local dir
   if [ $rc -eq 1 ]; then
@@ -261,6 +326,45 @@ restart_for_recovery() {
 }
 
 # One pstress step; sets RESULT to ok, crash, hang or overrun.
+lifecycle_worker() {
+  while kill -0 "$PSTRESS_PID" 2>/dev/null; do
+    awk -v n="$LIFECYCLE_BATCH" -v seed="$RANDOM$RANDOM" \
+      'BEGIN { srand(seed) } { l[NR] = $0 } END { for (i = 0; i < n; i++) print l[int(rand() * NR) + 1] ";" }' \
+      "$RUNDIR/life/lifecycle.sql" | "$MYSQL" -uroot -S "$SOCK" --force -vv >> "$1" 2>&1
+    [ -S "$SOCK" ] || sleep 1
+  done
+}
+
+start_lifecycle() {
+  LC_PIDS=
+  [ -n "$LIFECYCLE_GRAMMAR" ] || return 0
+  local i
+  for i in $(seq 1 "$LIFECYCLE_THREADS"); do
+    lifecycle_worker "$1/lifecycle_$i.log" &
+    LC_PIDS="$LC_PIDS $!"
+  done
+}
+
+# Stop each worker before killing its mysql client, or it starts another.
+stop_lifecycle() {
+  local p
+  for p in ${LC_PIDS:-}; do
+    kill -STOP "$p" 2>/dev/null
+    pkill -9 -P "$p" 2>/dev/null
+    kill -9 "$p" 2>/dev/null
+    wait "$p" 2>/dev/null
+  done
+  LC_PIDS=
+}
+
+# "UNINSTALL vsql_x ok/total ..." from the lifecycle worker logs in $1.
+lifecycle_summary() {
+  cat "$1"/lifecycle_*.log 2>/dev/null | awk '
+    /^(UN)?INSTALL EXTENSION / { stmt = $1 " " $3; next }
+    stmt != "" && /^(Query OK|ERROR)/ { tot[stmt]++; if (/^Query OK/) ok[stmt]++; stmt = "" }
+    END { for (s in tot) printf "%s %d/%d  ", s, ok[s], tot[s] }'
+}
+
 run_step() {
   STEP=$((STEP + 1)); TRIAL=$((TRIAL + 1))
   local tdir="$RUNDIR/life/step_$STEP"
@@ -274,6 +378,7 @@ run_step() {
 --grammar-file=$RUNDIR/life/grammar.sql --grammar-sql=$GRAMMAR_WEIGHT $PSTRESS_EXTRA"
   $PSTRESS_CMD > "$tdir/pstress.out" 2>&1 &
   PSTRESS_PID=$!
+  start_lifecycle "$tdir"
   local start; start=$(date +%s)
   local deadline=$((start + STEP_SECONDS + HANG_GRACE))
   local tick=0 noanswer=0 maxt
@@ -299,6 +404,7 @@ run_step() {
       RESULT=overrun; HANG_REASON="pstress ran ${HANG_GRACE}s past --seconds"; break
     fi
   done
+  stop_lifecycle
   if [ "$RESULT" = ok ]; then
     wait "$PSTRESS_PID" 2>/dev/null
     server_alive || RESULT=crash
@@ -369,6 +475,7 @@ fresh_datadir
 while [ "$TRIAL" -lt "$TRIALS" ] || [ "$TRIALS" -eq 0 ]; do
   run_step
   log "trial $TRIAL (life $LIFE step $STEP): $RESULT"
+  [ -n "$LIFECYCLE_GRAMMAR" ] && log "  lifecycle: $(lifecycle_summary "$RUNDIR/life/step_$STEP")"
   if [ "$TRIALS" -ne 0 ] && [ "$TRIAL" -ge "$TRIALS" ]; then
     handle_result
     break
