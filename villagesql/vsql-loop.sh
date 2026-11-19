@@ -205,6 +205,16 @@ capture_stacks() {
     run_timeout 60 sample "$MYSQLD_PID" 5 -file "$out/sample.txt" > /dev/null 2>&1
     run_timeout 120 lldb -p "$MYSQLD_PID" --batch -o "thread backtrace all" -o detach \
       > "$out/lldb_bt.txt" 2>&1
+    # Debug builds (SAFE_MUTEX) record each mutex's owner thread and the file
+    # and line that locked it; print them for the server mutexes a hang
+    # usually involves. A release build has no such record and prints errors.
+    local owners=() m
+    for m in LOCK_global_system_variables LOCK_plugin LOCK_plugin_delete \
+      'Persisted_variables_cache::m_instance->m_LOCK_persist_variables'; do
+      owners+=(-o "expr -- *($m).m_mutex.m_u.m_safe_ptr")
+    done
+    run_timeout 60 lldb -p "$MYSQLD_PID" --batch "${owners[@]}" -o detach \
+      > "$out/lldb_mutex_owners.txt" 2>&1
   else
     run_timeout 120 gdb -p "$MYSQLD_PID" -batch -ex "thread apply all bt" \
       > "$out/gdb_bt.txt" 2>&1
