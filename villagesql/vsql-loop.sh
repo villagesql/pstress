@@ -83,6 +83,10 @@ LIFECYCLE_BATCH=${LIFECYCLE_BATCH:-10}
 # prefix.
 CHECK_SQL=${CHECK_SQL:-}
 MYEXTRA=${MYEXTRA:-}
+# How mysqld reads option files. --no-defaults also skips mysqld-auto.cnf, so
+# SET PERSIST values are lost on restart; "--defaults-file=/dev/null" reads
+# no option file but keeps them.
+MYSQLD_DEFAULTS=${MYSQLD_DEFAULTS:---no-defaults}
 # Cycles mixing MDL and InnoDB row-lock waits are invisible to both deadlock
 # detectors and only break on these timeouts; long ones stall every thread.
 LOCK_WAIT_TIMEOUT=${LOCK_WAIT_TIMEOUT:-15}
@@ -171,7 +175,7 @@ prepare_template() {
 # Returns 0 when up, 1 when mysqld exited, 2 when it did not answer in time.
 start_server() {
   rm -f "$SOCK"
-  "$MYSQLD" --no-defaults --basedir="$BASEDIR" --datadir="$RUNDIR/data" \
+  "$MYSQLD" $MYSQLD_DEFAULTS --basedir="$BASEDIR" --datadir="$RUNDIR/data" \
     --socket="$SOCK" --port="$PORT" --mysqlx=OFF --core-file \
     --log-error="$ERR" --pid-file="$RUNDIR/mysqld.pid" --veb-dir="$RUNDIR/veb" \
     --lock-wait-timeout="$LOCK_WAIT_TIMEOUT" \
