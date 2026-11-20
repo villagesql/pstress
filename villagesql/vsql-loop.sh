@@ -97,6 +97,11 @@ START_TIMEOUT=${START_TIMEOUT:-180}
 SHUTDOWN_TIMEOUT=${SHUTDOWN_TIMEOUT:-120}
 SAVE_DATADIR=${SAVE_DATADIR:-1}
 PORT=${PORT:-$((30000 + RANDOM % 5000))}
+# Sanitizer options for a pstress built with ASan or UBSan. They replace the
+# environment's, which are meant for mysqld, so a client report does not stop
+# the run. Reports go to pstress.out.
+PSTRESS_ASAN_OPTIONS=${PSTRESS_ASAN_OPTIONS:-detect_leaks=0}
+PSTRESS_UBSAN_OPTIONS=${PSTRESS_UBSAN_OPTIONS:-print_stacktrace=1:halt_on_error=0}
 
 MYSQLD=$BASEDIR/bin/mysqld
 MYSQL=$BASEDIR/bin/mysql
@@ -390,7 +395,8 @@ run_step() {
 --logdir=$tdir --metadata-path=$RUNDIR/life/ --step $STEP --seed $SEED \
 --log-all-queries --log-failed-queries --no-encryption \
 --grammar-file=$RUNDIR/life/grammar.sql --grammar-sql=$GRAMMAR_WEIGHT $PSTRESS_EXTRA"
-  $PSTRESS_CMD > "$tdir/pstress.out" 2>&1 &
+  ASAN_OPTIONS=$PSTRESS_ASAN_OPTIONS UBSAN_OPTIONS=$PSTRESS_UBSAN_OPTIONS \
+    $PSTRESS_CMD > "$tdir/pstress.out" 2>&1 &
   PSTRESS_PID=$!
   start_lifecycle "$tdir"
   local start; start=$(date +%s)
