@@ -5,3 +5,7 @@ CMakeFiles
 Makefile
 *.a
 src/pstress-*
+
+# VillageSQL local build and run directories
+/build-vsql/
+/run/
