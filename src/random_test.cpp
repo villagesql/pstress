@@ -548,6 +548,7 @@ int sum_of_all_options(Thd1 *thd) {
   if (options->at(Option::NO_SELECT)->getBool()) {
     options->at(Option::SELECT_ALL_ROW)->setInt(0);
     options->at(Option::SELECT_ROW_USING_PKEY)->setInt(0);
+    options->at(Option::SELECT_TEMP_TABLE)->setInt(0);
     options->at(Option::SELECT_VECTOR_ANN)->setInt(0);
   }
   /* if delete is set as zero, disable all type of deletes */
@@ -3462,6 +3463,83 @@ void Table::DeleteAllRows(Thd1 *thd) {
   execute_sql(sql, thd);
 }
 
+/* true if select_temp_table queries can group, sort, deduplicate and join on
+ * the column */
+static bool temp_table_column(const Column *col) {
+  auto type = col->type_;
+  if (type == Column::GENERATED)
+    type = static_cast<const Generated_Column *>(col)->g_type;
+  return type == Column::INT || type == Column::INTEGER ||
+         type == Column::FLOAT || type == Column::DOUBLE ||
+         type == Column::CHAR || type == Column::VARCHAR ||
+         type == Column::BOOL || type == Column::BLOB;
+}
+
+void Table::SelectTempTable(Thd1 *thd) {
+  table_mutex.lock();
+  std::vector<std::string> cols;
+  for (auto col : *columns_) {
+    if (temp_table_column(col))
+      cols.push_back(col->name_);
+  }
+  table_mutex.unlock();
+  if (cols.empty())
+    return;
+
+  auto c = cols.at(rand_int(cols.size() - 1));
+  auto c2 = cols.at(rand_int(cols.size() - 1));
+  auto t = name_;
+  auto limit = " LIMIT " + std::to_string(rand_int(100, 1));
+  /* a statement can open a temporary table only once, so the shapes that
+   * read the table twice come last */
+  int shapes = type == TEMPORARY ? 5 : 9;
+  std::string sql;
+  switch (rand_int(shapes)) {
+  case 0:
+    sql = "SELECT " + c + ", COUNT(*) FROM " + t + " GROUP BY " + c;
+    if (rand_int(1) == 0)
+      sql += " ORDER BY " + c;
+    break;
+  case 1:
+    sql = "SELECT DISTINCT " + c + ", " + c2 + " FROM " + t + limit;
+    break;
+  case 2:
+    sql = "SELECT COUNT(DISTINCT " + c + ") FROM " + t;
+    break;
+  case 3:
+    sql = "SELECT * FROM " + t + " ORDER BY " + c +
+          (rand_int(1) == 0 ? " DESC" : "") + limit;
+    break;
+  case 4:
+    /* LIMIT keeps the derived table from being merged */
+    sql = "SELECT d." + c + ", COUNT(*) FROM (SELECT " + c + " FROM " + t +
+          " ORDER BY " + c + limit + ") AS d GROUP BY d." + c;
+    break;
+  case 5:
+    sql = "SELECT " + c + ", ROW_NUMBER() OVER (PARTITION BY " + c +
+          " ORDER BY " + c2 + ") FROM " + t + limit;
+    break;
+  case 6:
+    sql = "SELECT " + c + " FROM " + t + " WHERE " + c2 + " IS NOT NULL" +
+          (rand_int(1) == 0 ? " UNION " : " UNION ALL ") + "SELECT " + c +
+          " FROM " + t + limit;
+    break;
+  case 7:
+    /* a CTE read twice is materialized */
+    sql = "WITH cte AS (SELECT " + c + " FROM " + t + limit +
+          ") SELECT a." + c + " FROM cte a JOIN cte b ON a." + c + " = b." + c;
+    break;
+  case 8:
+    sql = "SELECT * FROM " + t + " a WHERE a." + c + " IN (SELECT b." + c +
+          " FROM " + t + " b)" + limit;
+    break;
+  default:
+    sql = "SELECT COUNT(*) FROM " + t + " a JOIN " + t + " b ON a." + c +
+          " = b." + c;
+  }
+  execute_sql(sql, thd);
+}
+
 void Table::SelectAllRow(Thd1 *thd) {
   std::string sql = "SELECT * FROM " + name_;
   if (type == PARTITION && rand_int(100) < 98) {
@@ -5349,6 +5427,9 @@ bool Thd1::run_some_query() {
       break;
     case Option::SELECT_ROW_USING_PKEY:
       table->SelectRandomRow(this);
+      break;
+    case Option::SELECT_TEMP_TABLE:
+      table->SelectTempTable(this);
       break;
     case Option::INSERT_RANDOM_ROW:
       table->InsertRandomRow(this);

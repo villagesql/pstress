@@ -537,6 +537,15 @@ void add_options() {
   opt->setInt(800);
   opt->setSQL();
 
+  opt = newOption(Option::INT, Option::SELECT_TEMP_TABLE, "select-temp-table");
+  opt->help = R"(
+    SELECT that makes the server build an internal temporary table or sort:
+    GROUP BY, DISTINCT, ORDER BY, UNION, a materialized derived table or CTE,
+    an IN subquery, a self join or a window function on a random column.
+  )";
+  opt->setInt(20);
+  opt->setSQL();
+
   /* Insert random row */
   opt = newOption(Option::INT, Option::INSERT_RANDOM_ROW, "insert-row");
   opt->help = "insert random row";

@@ -343,6 +343,9 @@ struct Table {
   void DeleteRandomRow(Thd1 *thd);
   void UpdateRandomROW(Thd1 *thd);
   void SelectRandomRow(Thd1 *thd);
+  /* GROUP BY, DISTINCT, ORDER BY, UNION, derived table, CTE, IN subquery,
+   * self join or window function on a random column */
+  void SelectTempTable(Thd1 *thd);
   void SelectAllRow(Thd1 *thd);
   void DeleteAllRows(Thd1 *thd);
   void ColumnRename(Thd1 *thd);
