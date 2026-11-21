@@ -158,6 +158,7 @@ struct Option {
     ADD_DROP_VECTOR_INDEX,
     CUSTOM_TYPES,
     CUSTOM_TYPE_PROB,
+    RECONNECT,
     MAX
   } option;
   Option(Type t, Opt o, std::string n)

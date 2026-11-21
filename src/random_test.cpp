@@ -5039,6 +5039,82 @@ void set_hnsw_ef_search(Thd1 *thd) {
 }
 
 /* return true if successful or error out in case of fail */
+bool Thd1::churn_connection(std::vector<Table *> *session_tables) {
+  static auto log_all = opt_bool(LOG_ALL_QUERIES);
+  static auto log_failed = opt_bool(LOG_FAILED_QUERIES);
+  std::string user = opt_string(USER);
+  std::string password = opt_string(PASSWORD);
+  std::string database = opt_string(DATABASE);
+  std::string what;
+  std::string error;
+  bool ok = false;
+
+  switch (rand_int(2)) {
+  case 0: {
+    what = "reconnect";
+    /* connect first, so a failure leaves the old connection in place */
+    MYSQL *fresh = mysql_init(nullptr);
+    if (fresh == nullptr) {
+      error = "mysql_init() failed";
+      break;
+    }
+    ok = mysql_real_connect(fresh, opt_string(ADDRESS).c_str(), user.c_str(),
+                            password.c_str(), database.c_str(),
+                            options->at(Option::PORT)->getInt(),
+                            opt_string(SOCKET).c_str(), 0) != nullptr;
+    if (ok) {
+      mysql_close(conn);
+      conn = fresh;
+    } else {
+      error = mysql_error(fresh);
+      mysql_close(fresh);
+    }
+    break;
+  }
+  case 1:
+    what = "reset connection";
+    ok = mysql_reset_connection(conn) == 0;
+    if (!ok)
+      error = mysql_error(conn);
+    break;
+  default:
+    what = "change user";
+    ok = !mysql_change_user(conn, user.c_str(), password.c_str(),
+                            database.c_str());
+    if (!ok)
+      error = mysql_error(conn);
+  }
+
+  performed_queries_total++;
+  action_executed_sql = true;
+  if (ok) {
+    max_con_fail_count = 0;
+    if (log_all)
+      thread_log << " S /* " << what << " */" << std::endl;
+  } else {
+    failed_queries_total++;
+    max_con_fail_count++;
+    if (log_all || log_failed)
+      thread_log << " F /* " << what << " */" << std::endl
+                 << "Error " << error << std::endl;
+    if (mysql_errno(conn) == CR_SERVER_GONE_ERROR ||
+        mysql_errno(conn) == CR_SERVER_LOST) {
+      thread_log << "server gone, while processing " << what << std::endl;
+      run_query_failed = true;
+    }
+    success = false;
+    return false;
+  }
+
+  /* the server dropped the session's temporary tables */
+  for (auto table : *session_tables) {
+    if (table->type == Table::TEMPORARY)
+      execute_sql(table->definition(), this);
+  }
+  success = true;
+  return true;
+}
+
 bool Thd1::run_some_query() {
   /* VECTOR after FK: the FK table takes the keys of its parent from
    * thd->unique_keys, which every bulk load overwrites */
@@ -5340,6 +5416,12 @@ bool Thd1::run_some_query() {
       break;
     case Option::SET_HNSW_EF_SEARCH:
       set_hnsw_ef_search(this);
+      break;
+    case Option::RECONNECT:
+      churn_connection(all_session_tables);
+      /* the server ended any open transaction */
+      trx_left = 0;
+      current_save_point = 0;
       break;
 
     default:

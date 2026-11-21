@@ -71,6 +71,9 @@ GRAMMAR_WEIGHT=${GRAMMAR_WEIGHT:-1000}   # pstress DML weights sum to ~2600
 PSTRESS_TABLES=${PSTRESS_TABLES:-20}
 PSTRESS_RECORDS=${PSTRESS_RECORDS:-200}
 PSTRESS_EXTRA=${PSTRESS_EXTRA:-}
+# pstress --reconnect weight: worker threads reconnect, reset the connection
+# or change user. 0 = keep one connection per thread for the whole step.
+RECONNECT=${RECONNECT:-20}
 # Lifecycle workers run beside pstress: each runs random batches of
 # LIFECYCLE_BATCH lines from LIFECYCLE_GRAMMAR, one short mysql session per
 # batch, so no session keeps an extension pinned. Empty = off.
@@ -394,7 +397,8 @@ run_step() {
 --tables=$PSTRESS_TABLES --records=$PSTRESS_RECORDS --user=root --socket=$SOCK \
 --logdir=$tdir --metadata-path=$RUNDIR/life/ --step $STEP --seed $SEED \
 --log-all-queries --log-failed-queries --no-encryption \
---grammar-file=$RUNDIR/life/grammar.sql --grammar-sql=$GRAMMAR_WEIGHT $PSTRESS_EXTRA"
+--grammar-file=$RUNDIR/life/grammar.sql --grammar-sql=$GRAMMAR_WEIGHT \
+--reconnect=$RECONNECT $PSTRESS_EXTRA"
   ASAN_OPTIONS=$PSTRESS_ASAN_OPTIONS UBSAN_OPTIONS=$PSTRESS_UBSAN_OPTIONS \
     $PSTRESS_CMD > "$tdir/pstress.out" 2>&1 &
   PSTRESS_PID=$!

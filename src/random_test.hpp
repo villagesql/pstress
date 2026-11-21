@@ -270,6 +270,9 @@ struct Thd1 {
 
   bool run_some_query(); // create default tables and run random queries
   bool load_metadata();  // load metada of tool in memory
+  /* reconnect, reset the connection or change user, then create the
+   * session's temporary tables again. false if that failed */
+  bool churn_connection(std::vector<Table *> *session_tables);
 
   int thread_id;
   int seed;

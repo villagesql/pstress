@@ -151,6 +151,8 @@ void Node::workerThread(int number) {
       }
     }
   }
+  /* churn_connection() may have replaced the connection */
+  conn = thd->conn;
   delete thd;
 
   if (thread_log.is_open())

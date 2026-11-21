@@ -326,6 +326,16 @@ void add_options() {
   opt->help = "Percentage of new random columns that use a --custom-types type";
   opt->setInt(15);
 
+  /* Connection churn */
+  opt = newOption(Option::INT, Option::RECONNECT, "reconnect");
+  opt->help = R"(
+    Close and reopen the connection, reset it (COM_RESET_CONNECTION) or change
+    user (COM_CHANGE_USER). Ends any open transaction; the session's temporary
+    tables are created again, empty.
+  )";
+  opt->setInt(0);
+  opt->setSQL();
+
   /* Initial Records in table */
   opt = newOption(Option::INT, Option::INITIAL_RECORDS_IN_TABLE, "records");
   opt->help =
