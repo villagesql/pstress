@@ -60,6 +60,7 @@ public:
     BLOB,
     GENERATED,
     VECTOR,
+    CUSTOM,
     COLUMN_MAX // should be last
   } type_;
   /* used to create new table/alter table add column*/
@@ -159,6 +160,52 @@ private:
   std::vector<float> rand_vector() const;
   /* seed of the pool and the cluster centres, from the table name */
   size_t seed_base;
+};
+
+/* A column type the server gets from a plugin or extension, described in the
+ * --custom-types file. The SQL of a type is given as templates, expanded by
+ * Custom_Column::expand():
+ *   {col}     column name
+ *   {dim}     the column's dimension, for types with a "dim" range
+ *   {int}     random integer, {float} random decimal
+ *   {floats}  {dim} random decimals separated by commas
+ *   {str}     random lower case string
+ *   {literal} the type's literal template, {value} a random value */
+struct Custom_Type {
+  std::string name;
+  std::string clause;  // column type, e.g. "TVECTOR({dim})"
+  int dim_min = 0;     // 0 if the type has no dimension
+  int dim_max = 0;
+  std::string literal; // quoted form the server converts to the type
+  std::string value;   // explicit conversion, e.g. "T::from_string('{str}')"
+  std::vector<std::string> where;  // boolean expressions on {col}
+  std::vector<std::string> update; // new values computed from {col}
+  bool indexable = false;          // set by the probe
+};
+
+/* types from --custom-types that passed the probe */
+bool custom_types_enabled();
+const Custom_Type *find_custom_type(const std::string &name);
+
+struct Custom_Column : public Column {
+  /* new column of a random custom type, name is prefixed with 'x' */
+  Custom_Column(std::string name, Table *table);
+  /* constructor used by load_metadata and the probe */
+  Custom_Column(std::string name, Table *table, const Custom_Type *type,
+                int dim);
+  template <typename Writer> void Serialize(Writer &writer) const;
+
+  std::string clause() { return expand(ctype->clause); };
+  /* the literal or the explicit conversion of a random value */
+  std::string rand_value();
+  /* value for UPDATE ... SET: a random value or an update expression */
+  std::string update_value();
+  /* boolean expression for a WHERE clause */
+  std::string where_expr();
+  std::string expand(const std::string &tmpl);
+
+  const Custom_Type *ctype;
+  int dim = 0;
 };
 
 struct Generated_Column : public Column {

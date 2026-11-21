@@ -49,6 +49,9 @@ static int sum_of_all_opts = 0; // sum of all probablility
 static bool g_vector_enabled = false;
 /* the server failed the HNSW probe */
 static bool g_vector_probe_failed = false;
+/* --custom-types types that passed the probe, set by setup_custom_types() in
+ * sum_of_all_options() */
+static std::vector<Custom_Type> g_custom_types;
 std::mutex ddl_logs_write;
 static std::chrono::system_clock::time_point start_time =
     std::chrono::system_clock::now();
@@ -263,6 +266,129 @@ static void setup_vector(Thd1 *thd) {
   disable_vector(thd, "the server has no HNSW vector index support");
 }
 
+/* a string member of a --custom-types entry, empty if it is missing */
+static std::string json_string(const Value &entry, const char *key) {
+  if (entry.HasMember(key) && entry[key].IsString())
+    return entry[key].GetString();
+  return "";
+}
+
+/* an array of strings member of a --custom-types entry */
+static std::vector<std::string> json_strings(const Value &entry,
+                                             const char *key) {
+  std::vector<std::string> strs;
+  if (entry.HasMember(key) && entry[key].IsArray()) {
+    for (auto &str : entry[key].GetArray()) {
+      if (str.IsString())
+        strs.push_back(str.GetString());
+    }
+  }
+  return strs;
+}
+
+/* run the SQL of a custom type on a scratch table. The type is usable if the
+ * server takes the column and the literal or the value form. A form or an
+ * expression the server refuses is left out, and the type is indexable if
+ * CREATE INDEX on the column works */
+static bool probe_custom_type(Thd1 *thd, Custom_Type &type,
+                              const std::string &table) {
+  Custom_Column col("c", nullptr, &type, type.dim_max);
+  execute_sql("DROP TABLE IF EXISTS " + table, thd);
+  if (!execute_sql("CREATE TABLE " + table + " (id INT PRIMARY KEY, c " +
+                       col.clause() + ")",
+                   thd))
+    return false;
+
+  if (!type.literal.empty() &&
+      !execute_sql("INSERT INTO " + table + " VALUES (1, " +
+                       col.expand(type.literal) + ")",
+                   thd))
+    type.literal.clear();
+  if (!type.value.empty() &&
+      !execute_sql("INSERT INTO " + table + " VALUES (2, " +
+                       col.expand(type.value) + ")",
+                   thd))
+    type.value.clear();
+
+  if (!type.literal.empty() || !type.value.empty()) {
+    std::vector<std::string> where, update;
+    for (auto &expr : type.where) {
+      if (execute_sql("SELECT id FROM " + table + " WHERE " + col.expand(expr),
+                      thd))
+        where.push_back(expr);
+    }
+    for (auto &expr : type.update) {
+      if (execute_sql("UPDATE " + table + " SET c = " + col.expand(expr), thd))
+        update.push_back(expr);
+    }
+    type.where = where;
+    type.update = update;
+    type.indexable = execute_sql("CREATE INDEX ci ON " + table + " (c)", thd);
+  }
+  execute_sql("DROP TABLE IF EXISTS " + table, thd);
+  return !type.literal.empty() || !type.value.empty();
+}
+
+/* read the --custom-types file and keep the types that pass the probe */
+static void setup_custom_types(Thd1 *thd) {
+  g_custom_types.clear();
+  std::string file = opt_string(CUSTOM_TYPES);
+  if (file.empty())
+    return;
+
+  std::ifstream in(file);
+  if (!in)
+    throw std::runtime_error("cannot read --custom-types file " + file);
+  std::stringstream text;
+  text << in.rdbuf();
+  Document doc;
+  doc.Parse(text.str().c_str());
+  if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("types") ||
+      !doc["types"].IsArray())
+    throw std::runtime_error("--custom-types file " + file +
+                             " must be a JSON object with a \"types\" array");
+
+  std::vector<Custom_Type> types;
+  for (auto &entry : doc["types"].GetArray()) {
+    Custom_Type type;
+    type.name = json_string(entry, "name");
+    if (type.name.empty())
+      throw std::runtime_error("--custom-types entry without a name");
+    type.clause = json_string(entry, "clause");
+    if (type.clause.empty())
+      type.clause = type.name;
+    if (entry.HasMember("dim") && entry["dim"].IsArray() &&
+        entry["dim"].Size() == 2) {
+      type.dim_min = entry["dim"][0].GetInt();
+      type.dim_max = entry["dim"][1].GetInt();
+    }
+    type.literal = json_string(entry, "literal");
+    type.value = json_string(entry, "value");
+    type.where = json_strings(entry, "where");
+    type.update = json_strings(entry, "update");
+    types.push_back(type);
+  }
+
+  const std::string db = "pstress_custom_probe";
+  execute_sql("CREATE DATABASE IF NOT EXISTS " + db, thd);
+  for (size_t i = 0; i < types.size(); i++) {
+    auto &type = types[i];
+    std::string msg = "Custom type " + type.name;
+    if (probe_custom_type(thd, type, db + ".t" + std::to_string(i))) {
+      msg += " enabled: literal " + std::string(type.literal.empty() ? "no" : "yes") +
+             ", value " + (type.value.empty() ? "no" : "yes") + ", " +
+             std::to_string(type.where.size()) + " WHERE and " +
+             std::to_string(type.update.size()) + " UPDATE expressions, " +
+             (type.indexable ? "" : "not ") + "indexable";
+      g_custom_types.push_back(type);
+    } else
+      msg += " disabled: the server refused the column or both value forms";
+    std::cout << msg << std::endl;
+    thd->ddl_logs << msg << std::endl;
+  }
+  execute_sql("DROP DATABASE IF EXISTS " + db, thd);
+}
+
 /* sum the final workload weights without repeating startup setup */
 static int sum_sql_option_weights() {
   int total = 0;
@@ -281,6 +407,7 @@ int sum_of_all_options(Thd1 *thd) {
 
   /* must run before any option is disabled or summed below */
   setup_vector(thd);
+  setup_custom_types(thd);
 
   /* find out innodb page_size */
   if (options->at(Option::ENGINE)->getString().compare("INNODB") == 0) {
@@ -709,6 +836,8 @@ Column::COLUMN_TYPES Column::col_type(std::string type) {
     return DOUBLE;
   else if (type.compare("VECTOR") == 0)
     return VECTOR;
+  else if (type.compare("CUSTOM") == 0)
+    return CUSTOM;
   else
     throw std::runtime_error("unhandled " + col_type_to_string(type_) +
                              " at line " + std::to_string(__LINE__));
@@ -737,6 +866,8 @@ const std::string Column::col_type_to_string(COLUMN_TYPES type) {
     return "GENERATED";
   case VECTOR:
     return "VECTOR";
+  case CUSTOM:
+    return "CUSTOM";
   case COLUMN_MAX:
     break;
   }
@@ -782,6 +913,7 @@ static std::string rand_value_universal(Column::COLUMN_TYPES type_,
     break;
   case Column::COLUMN_TYPES::GENERATED:
   case Column::COLUMN_TYPES::VECTOR:
+  case Column::COLUMN_TYPES::CUSTOM:
   case Column::COLUMN_TYPES::COLUMN_MAX:
     throw std::runtime_error("unhandled " + Column::col_type_to_string(type_) +
                              " at line " + std::to_string(__LINE__));
@@ -918,6 +1050,115 @@ std::string Vector_Column::rand_value() {
   return rand_vector_literal();
 }
 
+bool custom_types_enabled() { return !g_custom_types.empty(); }
+
+const Custom_Type *find_custom_type(const std::string &name) {
+  for (const auto &type : g_custom_types) {
+    if (type.name == name)
+      return &type;
+  }
+  return nullptr;
+}
+
+/* new column of a random custom type */
+Custom_Column::Custom_Column(std::string name, Table *table)
+    : Column(table, Column::CUSTOM) {
+  ctype = &g_custom_types.at(rand_int(g_custom_types.size() - 1));
+  name_ = "x" + name;
+  if (ctype->dim_max > 0)
+    dim = rand_int(ctype->dim_max, ctype->dim_min);
+}
+
+/* constructor used by load_metadata and the probe */
+Custom_Column::Custom_Column(std::string name, Table *table,
+                             const Custom_Type *type, int dim_)
+    : Column(table, Column::CUSTOM), ctype(type), dim(dim_) {
+  name_ = name;
+}
+
+/* random lower case string of 0 to 12 characters. rand_string() can't be
+ * used: its string pool does not exist yet when the probe runs */
+static std::string custom_string() {
+  std::uniform_int_distribution<int> letter('a', 'z');
+  std::string str(rand_int(12), ' ');
+  for (auto &c : str)
+    c = static_cast<char>(letter(rng));
+  return str;
+}
+
+/* random decimal in [-1000, 1000] with 0 to 3 decimals */
+static std::string custom_float() {
+  std::uniform_real_distribution<double> dis(-1000, 1000);
+  std::ostringstream out;
+  out << std::fixed << std::setprecision(rand_int(3)) << dis(rng);
+  return out.str();
+}
+
+std::string Custom_Column::expand(const std::string &tmpl) {
+  std::string out;
+  size_t i = 0;
+  while (i < tmpl.size()) {
+    auto end = tmpl[i] == '{' ? tmpl.find('}', i) : std::string::npos;
+    if (end == std::string::npos) {
+      out += tmpl[i++];
+      continue;
+    }
+    auto key = tmpl.substr(i + 1, end - i - 1);
+    if (key == "col")
+      out += name_;
+    else if (key == "dim")
+      out += std::to_string(dim);
+    else if (key == "int")
+      out += std::to_string(rand_int(1000));
+    else if (key == "float")
+      out += custom_float();
+    else if (key == "floats") {
+      for (int d = 0; d < std::max(dim, 1); d++)
+        out += (d > 0 ? "," : "") + custom_float();
+    } else if (key == "str")
+      out += custom_string();
+    else if (key == "literal")
+      out += expand(ctype->literal);
+    else if (key == "value")
+      out += rand_value();
+    else {
+      /* not a placeholder, keep the brace */
+      out += tmpl[i++];
+      continue;
+    }
+    i = end + 1;
+  }
+  return out;
+}
+
+std::string Custom_Column::rand_value() {
+  bool literal = !ctype->literal.empty();
+  if (literal && (ctype->value.empty() || rand_int(1) == 0))
+    return expand(ctype->literal);
+  return expand(ctype->value);
+}
+
+std::string Custom_Column::update_value() {
+  if (!ctype->update.empty() && rand_int(1) == 0)
+    return expand(ctype->update.at(rand_int(ctype->update.size() - 1)));
+  return rand_value();
+}
+
+std::string Custom_Column::where_expr() {
+  if (!ctype->where.empty() && rand_int(9) != 0)
+    return expand(ctype->where.at(rand_int(ctype->where.size() - 1)));
+  return name_ + (rand_int(1) == 0 ? " IS NULL" : " IS NOT NULL");
+}
+
+/* true if a regular (btree) index can use the column */
+static bool regular_index_column(const Column *col) {
+  if (col->compressed || col->type_ == Column::VECTOR)
+    return false;
+  if (col->type_ == Column::CUSTOM)
+    return static_cast<const Custom_Column *>(col)->ctype->indexable;
+  return true;
+}
+
 /* prepare single quoted string for LIKE clause */
 std::string &Table::prepare_like_string(std::string &&str) {
   /* Check if the incoming string is empty */
@@ -1033,7 +1274,8 @@ Generated_Column::Generated_Column(std::string name, Table *table,
 
 bool Generated_Column::has_base_column(const Table *table) {
   for (auto col : *table->columns_) {
-    if (!col->auto_increment && col->type_ != GENERATED && col->type_ != VECTOR)
+    if (!col->auto_increment && col->type_ != GENERATED &&
+        col->type_ != VECTOR && col->type_ != CUSTOM)
       return true;
   }
   return false;
@@ -1071,7 +1313,8 @@ Generated_Column::Generated_Column(std::string name, Table *table)
     size_t col = rand_int(table->columns_->size() - 1);
     if (!table->columns_->at(col)->auto_increment &&
         table->columns_->at(col)->type_ != GENERATED &&
-        table->columns_->at(col)->type_ != VECTOR)
+        table->columns_->at(col)->type_ != VECTOR &&
+        table->columns_->at(col)->type_ != CUSTOM)
       col_pos.push_back(col);
   }
 
@@ -1121,6 +1364,7 @@ Generated_Column::Generated_Column(std::string name, Table *table)
       case COLUMN_MAX:
       case GENERATED:
       case VECTOR:
+      case CUSTOM:
         throw std::runtime_error("unhandled " + col_type_to_string(col->type_) +
                                  " at line " + std::to_string(__LINE__));
       }
@@ -1173,6 +1417,15 @@ template <typename Writer> void Column::Serialize(Writer &writer) const {
 
 /* add dimension in metadata */
 template <typename Writer> void Vector_Column::Serialize(Writer &writer) const {
+  writer.String("dim");
+  writer.Int(dim);
+}
+
+/* add the custom type and dimension in metadata */
+template <typename Writer> void Custom_Column::Serialize(Writer &writer) const {
+  writer.String("custom_type");
+  writer.String(ctype->name.c_str(),
+                static_cast<SizeType>(ctype->name.length()));
   writer.String("dim");
   writer.Int(dim);
 }
@@ -1329,6 +1582,8 @@ template <typename Writer> void Table::Serialize(Writer &writer) const {
       static_cast<Blob_Column *>(col)->Serialize(writer);
     } else if (col->type_ == Column::VECTOR) {
       static_cast<Vector_Column *>(col)->Serialize(writer);
+    } else if (col->type_ == Column::CUSTOM) {
+      static_cast<Custom_Column *>(col)->Serialize(writer);
     }
     writer.EndObject();
   }
@@ -1918,6 +2173,9 @@ void Table::CreateRandomColumns(bool pk_allowed, bool has_auto_increment) {
         if (!no_virtual_col && i >= .8 * max_columns && rand_int(1) == 1 &&
             Generated_Column::has_base_column(this))
           col_type = Column::GENERATED;
+        else if (custom_types_enabled() &&
+                 rand_int(99) < options->at(Option::CUSTOM_TYPE_PROB)->getInt())
+          col_type = Column::CUSTOM;
         else if (prob < 5)
           col_type = Column::INT;
         else if (prob < 6)
@@ -1940,6 +2198,8 @@ void Table::CreateRandomColumns(bool pk_allowed, bool has_auto_increment) {
         col = new Generated_Column(name, this);
       else if (col_type == Column::BLOB)
         col = new Blob_Column(name, this);
+      else if (col_type == Column::CUSTOM)
+        col = new Custom_Column(name, this);
       else
         col = new Column(name, this, col_type);
 
@@ -1983,11 +2243,11 @@ void Table::CreateDefaultIndex() {
 
     static size_t max_columns = opt_int(INDEX_COLUMNS);
 
-    /* compressed and vector columns can't be in a regular index */
+    /* compressed, vector and some custom columns can't be in a regular index */
     int number_of_compressed = 0;
 
     for (auto column : *columns_)
-      if (column->compressed || column->type_ == Column::VECTOR)
+      if (!regular_index_column(column))
         number_of_compressed++;
 
     size_t number_of_columns = columns_->size() - number_of_compressed;
@@ -2004,8 +2264,7 @@ void Table::CreateDefaultIndex() {
     /* pick some columns */
     while (col_pos.size() < number_of_columns) {
       int current = rand_int(columns_->size() - 1);
-      if (columns_->at(current)->compressed ||
-          columns_->at(current)->type_ == Column::VECTOR)
+      if (!regular_index_column(columns_->at(current)))
         continue;
       /* auto-inc column should be first column in auto_inc_index */
       if (auto_inc_pos != -1 && i == auto_inc_index && col_pos.size() == 0)
@@ -2854,6 +3113,7 @@ void Table::ModifyColumn(Thd1 *thd) {
       break;
       /* todo no support for BOOL INT so far */
     case Column::BOOL:
+    case Column::CUSTOM:
     case Column::COLUMN_MAX:
       break;
     }
@@ -2986,7 +3246,9 @@ void Table::AddColumn(Thd1 *thd) {
     /* new columns are in ratio of 3:2:1:1:1:1
      * INT:VARCHAR:CHAR:BLOB:BOOL:GENERATD */
     auto prob = rand_int(8);
-    if (prob < 1)
+    if (custom_types_enabled() && rand_int(99) < options->at(Option::CUSTOM_TYPE_PROB)->getInt())
+      col_type = Column::CUSTOM;
+    else if (prob < 1)
       col_type = Column::INTEGER;
     else if (prob < 3)
       col_type = Column::INT;
@@ -3010,6 +3272,8 @@ void Table::AddColumn(Thd1 *thd) {
     tc = new Generated_Column(name, this);
   else if (col_type == Column::BLOB)
     tc = new Blob_Column(name, this);
+  else if (col_type == Column::CUSTOM)
+    tc = new Custom_Column(name, this);
   else
     tc = new Column(name, this, col_type);
 
@@ -3101,10 +3365,11 @@ void Table::AddIndex(Thd1 *thd) {
   static size_t max_columns = opt_int(INDEX_COLUMNS);
   std::unique_lock<std::mutex> metadata_lock(table_mutex);
 
-  /* vector columns can't be in a regular index */
+  /* vector and some custom columns can't be in a regular index */
   size_t index_columns = 0;
   for (auto col : *columns_)
-    if (col->type_ != Column::VECTOR)
+    if (col->type_ != Column::VECTOR &&
+        (col->type_ != Column::CUSTOM || regular_index_column(col)))
       index_columns++;
 
   if (index_columns == 0)
@@ -3119,7 +3384,9 @@ void Table::AddIndex(Thd1 *thd) {
   /* pick some columns */
   while (col_pos.size() < (size_t)no_of_columns) {
     int current = rand_int(columns_->size() - 1);
-    if (columns_->at(current)->type_ == Column::VECTOR)
+    auto col = columns_->at(current);
+    if (col->type_ == Column::VECTOR ||
+        (col->type_ == Column::CUSTOM && !regular_index_column(col)))
       continue;
     /* auto-inc column should be first column in auto_inc_index */
     bool already_added = false;
@@ -3333,6 +3600,10 @@ void Table::DeleteRandomRow(Thd1 *thd) {
         if (rand_int(1000) < 10)
           where = col_pos;
         break;
+      case Column::CUSTOM:
+        if (rand_int(1) == 0)
+          where = col_pos;
+        break;
       /* a vector column is never a WHERE column */
       case Column::VECTOR:
       case Column::COLUMN_MAX:
@@ -3357,23 +3628,27 @@ void Table::DeleteRandomRow(Thd1 *thd) {
 
     sql += ")";
   }
-  sql += " WHERE " + columns_->at(where)->name_;
-
   auto prob = rand_int(100);
-  if (prob <= 90)
-    sql += " = " + columns_->at(where)->rand_value();
-  else if (prob <= 92)
-    sql += " >= " + columns_->at(where)->rand_value() + " AND " +
-           columns_->at(where)->name_ +
-           " <= " + columns_->at(where)->rand_value();
-  else if (prob <= 96)
-    sql += " IN (" + columns_->at(where)->rand_value() + "," +
-           columns_->at(where)->rand_value() + ")";
-  else if (prob <= 99)
-    sql += " BETWEEN " + columns_->at(where)->rand_value() + " AND " +
-           columns_->at(where)->rand_value();
-  else
-    sql += " LIKE " + prepare_like_string(columns_->at(where)->rand_value());
+  if (columns_->at(where)->type_ == Column::CUSTOM)
+    sql += " WHERE " +
+           static_cast<Custom_Column *>(columns_->at(where))->where_expr();
+  else {
+    sql += " WHERE " + columns_->at(where)->name_;
+    if (prob <= 90)
+      sql += " = " + columns_->at(where)->rand_value();
+    else if (prob <= 92)
+      sql += " >= " + columns_->at(where)->rand_value() + " AND " +
+             columns_->at(where)->name_ +
+             " <= " + columns_->at(where)->rand_value();
+    else if (prob <= 96)
+      sql += " IN (" + columns_->at(where)->rand_value() + "," +
+             columns_->at(where)->rand_value() + ")";
+    else if (prob <= 99)
+      sql += " BETWEEN " + columns_->at(where)->rand_value() + " AND " +
+             columns_->at(where)->rand_value();
+    else
+      sql += " LIKE " + prepare_like_string(columns_->at(where)->rand_value());
+  }
 
   table_mutex.unlock();
   execute_sql(sql, thd);
@@ -3402,6 +3677,10 @@ void Table::SelectRandomRow(Thd1 *thd) {
       if (rand_int(1000) < 10)
         where = col_pos;
       break;
+    case Column::CUSTOM:
+      if (rand_int(1) == 0)
+        where = col_pos;
+      break;
     /* a vector column is never a WHERE column */
     case Column::VECTOR:
     case Column::COLUMN_MAX:
@@ -3427,8 +3706,15 @@ void Table::SelectRandomRow(Thd1 *thd) {
     sql += ")";
   }
 
-  sql += " WHERE " + columns_->at(where)->name_;
   auto prob = rand_int(100);
+  if (columns_->at(where)->type_ == Column::CUSTOM) {
+    sql += " WHERE " +
+           static_cast<Custom_Column *>(columns_->at(where))->where_expr();
+    table_mutex.unlock();
+    execute_sql(sql, thd);
+    return;
+  }
+  sql += " WHERE " + columns_->at(where)->name_;
   if (rand_int(1000) < 2)
     sql += " NOT BETWEEN " + columns_->at(where)->rand_value() + " AND " +
            columns_->at(where)->rand_value();
@@ -3489,6 +3775,10 @@ void Table::UpdateRandomROW(Thd1 *thd) {
       if (rand_int(1000) < 10)
         where = col_pos;
       break;
+    case Column::CUSTOM:
+      if (rand_int(1) == 0)
+        where = col_pos;
+      break;
     /* a vector column is never a WHERE column */
     case Column::VECTOR:
     case Column::COLUMN_MAX:
@@ -3514,8 +3804,12 @@ void Table::UpdateRandomROW(Thd1 *thd) {
     sql += ")";
   }
 
-  sql += " SET " + columns_->at(set)->name_ + " = " +
-         columns_->at(set)->rand_value() + " WHERE ";
+  auto set_col = columns_->at(set);
+  sql += " SET " + set_col->name_ + " = " +
+         (set_col->type_ == Column::CUSTOM
+              ? static_cast<Custom_Column *>(set_col)->update_value()
+              : set_col->rand_value()) +
+         " WHERE ";
 
   /* if tables has pkey try to use that in where clause for 50% cases */
   for (size_t i = 0; i < columns_->size(); i++) {
@@ -3525,7 +3819,9 @@ void Table::UpdateRandomROW(Thd1 *thd) {
     }
   }
   auto prob = rand_int(100);
-  if (prob <= 90)
+  if (columns_->at(where)->type_ == Column::CUSTOM)
+    sql += static_cast<Custom_Column *>(columns_->at(where))->where_expr();
+  else if (prob <= 90)
     sql +=
         columns_->at(where)->name_ + " = " + columns_->at(where)->rand_value();
   else if (prob <= 92)
@@ -4148,6 +4444,15 @@ static std::string load_metadata_from_file() {
       } else if (type.compare("VECTOR") == 0) {
         a = new Vector_Column(col["name"].GetString(), table,
                               col["dim"].GetInt());
+      } else if (type.compare("CUSTOM") == 0) {
+        std::string type_name = col["custom_type"].GetString();
+        auto ctype = find_custom_type(type_name);
+        if (ctype == nullptr)
+          throw std::runtime_error("metadata has a column of custom type " +
+                                   type_name +
+                                   ", which --custom-types does not provide");
+        a = new Custom_Column(col["name"].GetString(), table, ctype,
+                              col["dim"].GetInt());
       } else
         throw std::runtime_error("unhandled column type");
 
@@ -4462,7 +4767,8 @@ static std::string ann_condition(Vector_table *table, const std::string &alias,
   /* another column, never the vector column */
   std::vector<Column *> others;
   for (auto col : *table->columns_) {
-    if (col->type_ != Column::VECTOR && !col->primary_key)
+    if (col->type_ != Column::VECTOR && col->type_ != Column::CUSTOM &&
+        !col->primary_key)
       others.push_back(col);
   }
   if (others.empty())

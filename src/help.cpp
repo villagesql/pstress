@@ -311,6 +311,21 @@ void add_options() {
   opt->setSQL();
   opt->setDDL();
 
+  /* Custom column types */
+  opt = newOption(Option::STRING, Option::CUSTOM_TYPES, "custom-types");
+  opt->help = R"(
+    JSON file describing column types the server gets from plugins or
+    extensions: the column clause, literal and value templates, and WHERE and
+    UPDATE expressions. Each type is probed at startup, and a type, expression
+    or index the server refuses is left out.
+  )";
+  opt->setString("");
+
+  /* Probability of custom columns */
+  opt = newOption(Option::INT, Option::CUSTOM_TYPE_PROB, "custom-type-prob");
+  opt->help = "Percentage of new random columns that use a --custom-types type";
+  opt->setInt(15);
+
   /* Initial Records in table */
   opt = newOption(Option::INT, Option::INITIAL_RECORDS_IN_TABLE, "records");
   opt->help =
