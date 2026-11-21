@@ -546,6 +546,17 @@ void add_options() {
   opt->setInt(20);
   opt->setSQL();
 
+  opt = newOption(Option::INT, Option::TEMP_TABLE_SETTINGS,
+                  "temp-table-settings");
+  opt->help = R"(
+    Percentage of --select-temp-table queries preceded by a SET SESSION that
+    changes where the temporary table is kept or when it spills to disk:
+    internal_tmp_mem_storage_engine, tmp_table_size, max_heap_table_size,
+    big_tables, sort_buffer_size, join_buffer_size, max_sort_length or an
+    optimizer_switch flag.
+  )";
+  opt->setInt(25);
+
   /* Insert random row */
   opt = newOption(Option::INT, Option::INSERT_RANDOM_ROW, "insert-row");
   opt->help = "insert random row";

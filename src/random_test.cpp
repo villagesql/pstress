@@ -3475,6 +3475,55 @@ static bool temp_table_column(const Column *col) {
          type == Column::BOOL || type == Column::BLOB;
 }
 
+/* SET SESSION of one setting that changes where an internal temporary table
+ * is kept, when it spills to disk, or how the optimizer materializes and
+ * joins. Small sizes are near the minimum the server allows */
+static std::string temp_table_setting() {
+  auto pick = [](const std::vector<std::string> &values) {
+    return values.at(rand_int(values.size() - 1));
+  };
+  std::string var;
+  std::string value;
+  switch (rand_int(7)) {
+  case 0:
+    var = "internal_tmp_mem_storage_engine";
+    value = pick({"TempTable", "MEMORY"});
+    break;
+  case 1:
+    var = "tmp_table_size";
+    value = pick({"1024", "16384", "1048576", "DEFAULT"});
+    break;
+  case 2:
+    var = "max_heap_table_size";
+    value = pick({"16384", "1048576", "DEFAULT"});
+    break;
+  case 3:
+    var = "big_tables";
+    value = pick({"ON", "OFF"});
+    break;
+  case 4:
+    var = "sort_buffer_size";
+    value = pick({"32768", "65536", "DEFAULT"});
+    break;
+  case 5:
+    var = "join_buffer_size";
+    value = pick({"128", "8192", "DEFAULT"});
+    break;
+  case 6:
+    var = "max_sort_length";
+    value = pick({"4", "64", "DEFAULT"});
+    break;
+  default:
+    var = "optimizer_switch";
+    value = "'" +
+            pick({"block_nested_loop", "materialization", "semijoin",
+                  "subquery_materialization_cost_based", "derived_merge",
+                  "duplicateweedout", "firstmatch", "loosescan"}) +
+            (rand_int(1) == 0 ? "=on'" : "=off'");
+  }
+  return "SET SESSION " + var + " = " + value;
+}
+
 void Table::SelectTempTable(Thd1 *thd) {
   table_mutex.lock();
   std::vector<std::string> cols;
@@ -3537,6 +3586,9 @@ void Table::SelectTempTable(Thd1 *thd) {
     sql = "SELECT COUNT(*) FROM " + t + " a JOIN " + t + " b ON a." + c +
           " = b." + c;
   }
+  static auto settings_prob = options->at(Option::TEMP_TABLE_SETTINGS)->getInt();
+  if (rand_int(99) < settings_prob)
+    execute_sql(temp_table_setting(), thd);
   execute_sql(sql, thd);
 }
 
