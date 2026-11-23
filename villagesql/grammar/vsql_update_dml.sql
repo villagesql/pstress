@@ -39,3 +39,17 @@ SELECT @@global.update_test.threshold
 SELECT EXTENSION_NAME, EXTENSION_VERSION, PENDING_VERSION FROM INFORMATION_SCHEMA.EXTENSIONS
 DELETE FROM vupd.ut_log ORDER BY id LIMIT 100
 INSERT INTO vupd.ut_log (src, r) SELECT 'T1', update_test.counter_double(vupd.ut1.val) FROM T1 JOIN vupd.ut1 ON vupd.ut1.id = T1_INT_1 LIMIT 5
+CALL vupd.p_ut_lit()
+CALL vupd.p_ut_lit()
+SELECT vupd.f_ut_double('13') FROM vupd.ut1 LIMIT 20
+SELECT vupd.f_ut_id('21') FROM vupd.ut1 LIMIT 20
+PREPARE ps_vu_lit_ins FROM 'INSERT INTO vupd.ut1 (grp, val) VALUES (2, ''21'')'
+EXECUTE ps_vu_lit_ins
+FLUSH TABLES vupd.ut1
+EXECUTE ps_vu_lit_ins
+DEALLOCATE PREPARE ps_vu_lit_ins
+PREPARE ps_vu_lit_sel FROM 'SELECT id FROM vupd.ut1 WHERE val = ''21'' LIMIT 5'
+EXECUTE ps_vu_lit_sel
+FLUSH TABLES vupd.ut1
+EXECUTE ps_vu_lit_sel
+DEALLOCATE PREPARE ps_vu_lit_sel

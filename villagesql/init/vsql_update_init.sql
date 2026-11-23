@@ -109,5 +109,17 @@ CREATE PROCEDURE p_ut_scan(g INT)
 CREATE TRIGGER ut1_ai AFTER INSERT ON ut1 FOR EACH ROW
   INSERT INTO ut_log (src, r) VALUES ('ut1_ai', update_test.counter_double(NEW.val));
 
+-- A custom-type routine variable with a DEFAULT and a SET literal: the
+-- variable table is rebuilt on every CALL, the literals are reused.
+DELIMITER //
+CREATE PROCEDURE p_ut_lit()
+BEGIN
+  DECLARE c update_test.COUNTER DEFAULT '7';
+  INSERT INTO ut_log (src, r) VALUES ('p_ut_lit', update_test.counter_double(c));
+  SET c = '9';
+  INSERT INTO ut_log (src, r) VALUES ('p_ut_lit', update_test.counter_double(c));
+END//
+DELIMITER ;
+
 -- Database for short-lived objects the grammar creates and drops.
 CREATE DATABASE vupd2;

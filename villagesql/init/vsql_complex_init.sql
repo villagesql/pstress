@@ -88,5 +88,30 @@ CREATE TRIGGER vc2_bi BEFORE INSERT ON vc2 FOR EACH ROW
 CREATE TRIGGER vc1_au AFTER UPDATE ON vc1 FOR EACH ROW
   INSERT INTO vc_log (src, r, c) VALUES ('vc1_au', complex_real(NEW.c), NEW.c);
 
+-- Text literals saved into or compared with a custom-type field inside a
+-- statement that runs more than once: a routine variable's DEFAULT and SET
+-- (the variable table is rebuilt on every CALL), a function called once per
+-- row, and a trigger. The literal must not keep bytes owned by a table that
+-- is gone by the next execution.
+DELIMITER //
+CREATE PROCEDURE p_vc_lit()
+BEGIN
+  DECLARE a COMPLEX DEFAULT '(1.5,2.5)';
+  INSERT INTO vc_log (src, r, c) VALUES ('p_vc_lit', complex_real(a), a);
+  SET a = '(7,8)';
+  INSERT INTO vc_log (src, r, c)
+    SELECT 'p_vc_lit', COUNT(*), a FROM vc1 WHERE c = '(1,2)' OR c = a;
+END//
+CREATE FUNCTION f_vc_lit(n INT) RETURNS DOUBLE DETERMINISTIC
+BEGIN
+  DECLARE a COMPLEX DEFAULT '(3,4)';
+  RETURN complex_abs(a) + n;
+END//
+DELIMITER ;
+
+CREATE TRIGGER vc2_ai AFTER INSERT ON vc2 FOR EACH ROW
+  INSERT INTO vc_log (src, r)
+    SELECT 'vc2_ai', COUNT(*) FROM vc1 WHERE grp = NEW.grp AND c = '(1,2)';
+
 -- Database for the lifecycle workers (conf/vsql_lifecycle.conf).
 CREATE DATABASE vlc;

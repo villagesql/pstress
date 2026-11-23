@@ -59,3 +59,25 @@ INSERT INTO vsql.vc2 (grp, c) SELECT T1_INT_1 % 10, COMPLEX::from_string(CONCAT(
 SELECT T1_INT_1, vsql.vc1.c FROM T1 JOIN vsql.vc1 ON vsql.vc1.grp = T1_INT_1 % 10 ORDER BY vsql.vc1.c LIMIT 20
 UPDATE T1 SET T1_VARCHAR_1 = (SELECT COMPLEX::to_string(c) FROM vsql.vc1 ORDER BY RAND() LIMIT 1) LIMIT 3
 UPDATE vsql.vc1 SET c = (SELECT COMPLEX::from_string(CONCAT('(', T1_INT_1, ',', T1_INT_2, ')')) FROM T1 LIMIT 1) WHERE grp = FLOOR(RAND() * 10) LIMIT 2
+CALL vsql.p_vc_lit()
+CALL vsql.p_vc_lit()
+SELECT vsql.f_vc_lit(id) FROM vsql.vc1 LIMIT 20
+SELECT vsql.f_vc_conj('(1,2)') FROM vsql.vc1 LIMIT 20
+SELECT complex_real(vsql.f_vc_conj('(0.5,-1.5)')) FROM vsql.vc2 LIMIT 20
+INSERT INTO vsql.vc2 (grp, c) VALUES (FLOOR(RAND() * 10), '(1,2)')
+PREPARE ps_vc_lit_ins FROM 'INSERT INTO vsql.vc2 (grp, c) VALUES (3, ''(5.5,6.5)'')'
+EXECUTE ps_vc_lit_ins
+FLUSH TABLES vsql.vc2
+EXECUTE ps_vc_lit_ins
+DEALLOCATE PREPARE ps_vc_lit_ins
+PREPARE ps_vc_lit_sel FROM 'SELECT id FROM vsql.vc1 WHERE c = ''(1,2)'' OR c IN (''(3,4)'', ''(5,6)'') LIMIT 10'
+EXECUTE ps_vc_lit_sel
+FLUSH TABLES vsql.vc1
+EXECUTE ps_vc_lit_sel
+EXECUTE ps_vc_lit_sel
+DEALLOCATE PREPARE ps_vc_lit_sel
+PREPARE ps_vc_lit_upd FROM 'UPDATE vsql.vc4 SET c = ''(9,9)'' WHERE c = ''(9,9)'' LIMIT 1'
+EXECUTE ps_vc_lit_upd
+FLUSH TABLES vsql.vc4
+EXECUTE ps_vc_lit_upd
+DEALLOCATE PREPARE ps_vc_lit_upd
