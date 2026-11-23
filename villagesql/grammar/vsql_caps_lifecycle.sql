@@ -1,0 +1,17 @@
+UNINSTALL EXTENSION vsql_slow_query_log
+INSTALL EXTENSION vsql_slow_query_log
+UNINSTALL EXTENSION vsql_usage_counter
+INSTALL EXTENSION vsql_usage_counter
+UNINSTALL EXTENSION vsql_thread_worker_test
+INSTALL EXTENSION vsql_thread_worker_test
+UNINSTALL EXTENSION vsql_lifecycle_test
+INSTALL EXTENSION vsql_lifecycle_test
+UNINSTALL EXTENSION vsql_mysql_services_session_test
+INSTALL EXTENSION vsql_mysql_services_session_test
+SET PERSIST vsql_slow_query_log.threshold_ms = 1
+SET PERSIST vsql_lifecycle_test.monitor_enabled = ON
+SET PERSIST vsql_thread_worker_test.listener_enabled = ON
+RESET PERSIST vsql_slow_query_log.threshold_ms
+RESET PERSIST vsql_lifecycle_test.monitor_enabled
+RESET PERSIST vsql_thread_worker_test.listener_enabled
+SELECT * FROM INFORMATION_SCHEMA.EXTENSIONS
