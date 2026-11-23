@@ -557,6 +557,18 @@ void add_options() {
   )";
   opt->setInt(25);
 
+  opt = newOption(Option::INT, Option::TEMP_TABLE_COMPARE,
+                  "temp-table-compare");
+  opt->help = R"(
+    Percentage of --select-temp-table queries on InnoDB tables that run twice
+    in one consistent snapshot, with a setting from --temp-table-settings
+    changed in between. Different rows are reported as a RESULT MISMATCH on
+    stdout and in the thread log. The compared queries ignore secondary
+    indexes: a consistent read through one can return a row twice or miss one
+    while other sessions update the table (MySQL bug #121855).
+  )";
+  opt->setInt(10);
+
   /* Insert random row */
   opt = newOption(Option::INT, Option::INSERT_RANDOM_ROW, "insert-row");
   opt->help = "insert random row";

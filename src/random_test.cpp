@@ -7,6 +7,7 @@
 #include "common.hpp"
 #include "node.hpp"
 #include <iomanip>
+#include <iterator>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -3478,13 +3479,17 @@ static bool temp_table_column(const Column *col) {
 /* SET SESSION of one setting that changes where an internal temporary table
  * is kept, when it spills to disk, or how the optimizer materializes and
  * joins. Small sizes are near the minimum the server allows */
-static std::string temp_table_setting() {
+static std::string temp_table_setting(bool same_result = false) {
   auto pick = [](const std::vector<std::string> &values) {
     return values.at(rand_int(values.size() - 1));
   };
   std::string var;
   std::string value;
-  switch (rand_int(7)) {
+  /* max_sort_length can change how long values group and sort */
+  auto choice = rand_int(same_result ? 6 : 7);
+  if (same_result && choice == 6)
+    choice = 7;
+  switch (choice) {
   case 0:
     var = "internal_tmp_mem_storage_engine";
     value = pick({"TempTable", "MEMORY"});
@@ -3524,6 +3529,60 @@ static std::string temp_table_setting() {
   return "SET SESSION " + var + " = " + value;
 }
 
+/* the rows of the last result of thd, as sorted strings, false if there is
+ * no result */
+static bool result_rows(Thd1 *thd, std::vector<std::string> &rows) {
+  rows.clear();
+  if (!thd->result)
+    return false;
+  auto res = thd->result.get();
+  mysql_data_seek(res, 0);
+  auto fields = mysql_num_fields(res);
+  while (auto row = mysql_fetch_row(res)) {
+    auto lengths = mysql_fetch_lengths(res);
+    std::string str;
+    for (unsigned int i = 0; i < fields; i++) {
+      str += i > 0 ? "|" : "";
+      str += row[i] == nullptr ? "NULL" : "'" + std::string(row[i], lengths[i]) + "'";
+    }
+    rows.push_back(str);
+  }
+  std::sort(rows.begin(), rows.end());
+  return true;
+}
+
+/* run sql twice in one consistent snapshot, with one temporary table setting
+ * changed in between, and report different rows */
+static void compare_temp_table_query(const std::string &sql, Thd1 *thd) {
+  std::vector<std::string> first, second;
+  execute_sql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", thd);
+  if (!execute_sql("START TRANSACTION WITH CONSISTENT SNAPSHOT", thd))
+    return;
+  auto setting = temp_table_setting(true);
+  bool compared = execute_sql(sql, thd) && result_rows(thd, first) &&
+                  execute_sql(setting, thd) && execute_sql(sql, thd) &&
+                  result_rows(thd, second);
+  execute_sql("COMMIT", thd);
+  if (!compared || first == second)
+    return;
+
+  std::ostringstream msg;
+  msg << "RESULT MISMATCH thread " << thd->thread_id << ": " << sql
+      << " returned " << first.size() << " rows, then " << second.size()
+      << " rows after " << setting;
+  std::cout << msg.str() << std::endl;
+  thd->thread_log << msg.str() << std::endl;
+  std::vector<std::string> only_first, only_second;
+  std::set_difference(first.begin(), first.end(), second.begin(), second.end(),
+                      std::back_inserter(only_first));
+  std::set_difference(second.begin(), second.end(), first.begin(), first.end(),
+                      std::back_inserter(only_second));
+  for (size_t i = 0; i < only_first.size() && i < 10; i++)
+    thd->thread_log << "  first only: " << only_first[i] << std::endl;
+  for (size_t i = 0; i < only_second.size() && i < 10; i++)
+    thd->thread_log << "  second only: " << only_second[i] << std::endl;
+}
+
 void Table::SelectTempTable(Thd1 *thd) {
   table_mutex.lock();
   std::vector<std::string> cols;
@@ -3531,6 +3590,9 @@ void Table::SelectTempTable(Thd1 *thd) {
     if (temp_table_column(col))
       cols.push_back(col->name_);
   }
+  std::string index_names;
+  for (auto index : *indexes_)
+    index_names += (index_names.empty() ? "" : ", ") + index->name_;
   table_mutex.unlock();
   if (cols.empty())
     return;
@@ -3538,58 +3600,84 @@ void Table::SelectTempTable(Thd1 *thd) {
   auto c = cols.at(rand_int(cols.size() - 1));
   auto c2 = cols.at(rand_int(cols.size() - 1));
   auto t = name_;
-  auto limit = " LIMIT " + std::to_string(rand_int(100, 1));
+
+  /* only InnoDB reads from a consistent snapshot */
+  static auto compare_prob = options->at(Option::TEMP_TABLE_COMPARE)->getInt();
+  std::string table_engine = engine.empty() ? opt_string(ENGINE) : engine;
+  std::transform(table_engine.begin(), table_engine.end(),
+                 table_engine.begin(), ::toupper);
+  bool compare = table_engine == "INNODB" && rand_int(99) < compare_prob;
+
+  /* a compared query reads every row: a LIMIT without a total order can
+   * return different rows each time. The LIMIT still keeps the derived
+   * table from being merged */
+  auto limit = " LIMIT " + (compare ? std::string("18446744073709551615")
+                                    : std::to_string(rand_int(100, 1)));
+  /* a compared query reads the table through the primary key or a table
+   * scan: a consistent read through a secondary index can return a row twice
+   * or miss one while other sessions update it (MySQL bug #121855) */
+  std::string hint =
+      compare && !index_names.empty() ? " IGNORE INDEX (" + index_names + ")"
+                                      : "";
+  /* the table in a FROM clause, with an optional alias */
+  auto from = [&](const std::string &alias) {
+    return t + (alias.empty() ? "" : " " + alias) + hint;
+  };
   /* a statement can open a temporary table only once, so the shapes that
    * read the table twice come last */
   int shapes = type == TEMPORARY ? 5 : 9;
   std::string sql;
   switch (rand_int(shapes)) {
   case 0:
-    sql = "SELECT " + c + ", COUNT(*) FROM " + t + " GROUP BY " + c;
+    sql = "SELECT " + c + ", COUNT(*) FROM " + from("") + " GROUP BY " + c;
     if (rand_int(1) == 0)
       sql += " ORDER BY " + c;
     break;
   case 1:
-    sql = "SELECT DISTINCT " + c + ", " + c2 + " FROM " + t + limit;
+    sql = "SELECT DISTINCT " + c + ", " + c2 + " FROM " + from("") + limit;
     break;
   case 2:
-    sql = "SELECT COUNT(DISTINCT " + c + ") FROM " + t;
+    sql = "SELECT COUNT(DISTINCT " + c + ") FROM " + from("");
     break;
   case 3:
-    sql = "SELECT * FROM " + t + " ORDER BY " + c +
+    sql = "SELECT * FROM " + from("") + " ORDER BY " + c +
           (rand_int(1) == 0 ? " DESC" : "") + limit;
     break;
   case 4:
     /* LIMIT keeps the derived table from being merged */
-    sql = "SELECT d." + c + ", COUNT(*) FROM (SELECT " + c + " FROM " + t +
+    sql = "SELECT d." + c + ", COUNT(*) FROM (SELECT " + c + " FROM " + from("") +
           " ORDER BY " + c + limit + ") AS d GROUP BY d." + c;
     break;
   case 5:
-    sql = "SELECT " + c + ", ROW_NUMBER() OVER (PARTITION BY " + c +
-          " ORDER BY " + c2 + ") FROM " + t + limit;
+    /* RANK(), unlike ROW_NUMBER(), numbers ties the same every time */
+    sql = "SELECT " + c + ", RANK() OVER (PARTITION BY " + c +
+          " ORDER BY " + c2 + ") FROM " + from("") + limit;
     break;
   case 6:
-    sql = "SELECT " + c + " FROM " + t + " WHERE " + c2 + " IS NOT NULL" +
+    sql = "SELECT " + c + " FROM " + from("") + " WHERE " + c2 + " IS NOT NULL" +
           (rand_int(1) == 0 ? " UNION " : " UNION ALL ") + "SELECT " + c +
-          " FROM " + t + limit;
+          " FROM " + from("") + limit;
     break;
   case 7:
     /* a CTE read twice is materialized */
-    sql = "WITH cte AS (SELECT " + c + " FROM " + t + limit +
+    sql = "WITH cte AS (SELECT " + c + " FROM " + from("") + limit +
           ") SELECT a." + c + " FROM cte a JOIN cte b ON a." + c + " = b." + c;
     break;
   case 8:
-    sql = "SELECT * FROM " + t + " a WHERE a." + c + " IN (SELECT b." + c +
-          " FROM " + t + " b)" + limit;
+    sql = "SELECT * FROM " + from("a") + " WHERE a." + c + " IN (SELECT b." + c +
+          " FROM " + from("b") + ")" + limit;
     break;
   default:
-    sql = "SELECT COUNT(*) FROM " + t + " a JOIN " + t + " b ON a." + c +
+    sql = "SELECT COUNT(*) FROM " + from("a") + " JOIN " + from("b") + " ON a." + c +
           " = b." + c;
   }
   static auto settings_prob = options->at(Option::TEMP_TABLE_SETTINGS)->getInt();
   if (rand_int(99) < settings_prob)
     execute_sql(temp_table_setting(), thd);
-  execute_sql(sql, thd);
+  if (compare)
+    compare_temp_table_query(sql, thd);
+  else
+    execute_sql(sql, thd);
 }
 
 void Table::SelectAllRow(Thd1 *thd) {
