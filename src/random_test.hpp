@@ -170,6 +170,7 @@ private:
  *   {int}     random integer, {float} random decimal
  *   {floats}  {dim} random decimals separated by commas
  *   {str}     random lower case string
+ *   {bits}    1 to {dim} characters, each 0 or 1
  *   {literal} the type's literal template, {value} a random value */
 struct Custom_Type {
   std::string name;

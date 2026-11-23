@@ -1119,7 +1119,12 @@ std::string Custom_Column::expand(const std::string &tmpl) {
         out += (d > 0 ? "," : "") + custom_float();
     } else if (key == "str")
       out += custom_string();
-    else if (key == "literal")
+    else if (key == "bits") {
+      /* 1 to dim characters, each '0' or '1' */
+      auto n = rand_int(std::max(dim, 1), 1);
+      for (int b = 0; b < n; b++)
+        out += rand_int(1) ? '1' : '0';
+    } else if (key == "literal")
       out += expand(ctype->literal);
     else if (key == "value")
       out += rand_value();

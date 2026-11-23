@@ -33,7 +33,10 @@
     {
       "name": "TVECTOR",
       "clause": "TVECTOR({dim})",
-      "dim": [1, 16],
+      "dim": [
+        1,
+        16
+      ],
       "literal": "'[{floats}]'",
       "value": "TVECTOR::from_string('[{floats}]')",
       "where": [
@@ -62,6 +65,48 @@
         "rot13({col})",
         "even_chars({col})",
         "odd_chars({col})"
+      ]
+    },
+    {
+      "name": "TARRAY",
+      "clause": "vsql_tarray_test.TARRAY('max_size={dim},type=float')",
+      "dim": [
+        1,
+        12
+      ],
+      "literal": "'[{floats}]'",
+      "where": [
+        "vsql_tarray_test.tarray_dim({col}) = {dim}",
+        "vsql_tarray_test.tarray_dim({col}) > {int}",
+        "{col} = {literal}"
+      ],
+      "update": [
+        "vsql_tarray_test.tarray_concat({col}, {col})"
+      ]
+    },
+    {
+      "name": "BITFIELD",
+      "clause": "vsql_bitfield_test.BITFIELD('max_number_of_bits={dim}')",
+      "dim": [
+        1,
+        64
+      ],
+      "literal": "'{bits}'",
+      "where": [
+        "vsql_bitfield_test.bitfield_length({col}) = {dim}",
+        "vsql_bitfield_test.bitfield_popcount({col}) > {int}",
+        "{col} = {literal}",
+        "{col} <> {literal}"
+      ]
+    },
+    {
+      "name": "STORED_INT",
+      "clause": "vsql_storage_test.STORED_INT",
+      "literal": "'{int}'",
+      "where": [
+        "{col} = {literal}",
+        "{col} <> {literal}",
+        "{col} IN ({literal}, {literal})"
       ]
     }
   ]
