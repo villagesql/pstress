@@ -47,3 +47,22 @@ UNINSTALL EXTENSION vsql_tvector
 INSTALL EXTENSION vsql_tvector
 UNINSTALL EXTENSION vsql_complex
 SELECT * FROM INFORMATION_SCHEMA.EXTENSIONS
+CREATE TABLE IF NOT EXISTS vlc.li (id INT AUTO_INCREMENT PRIMARY KEY, v TVECTOR(3), w TVECTOR(3), mx DOUBLE AS (vsql_tvector.tvector_max_element(v)) STORED, dm INT AS (vsql_tvector.tvector_dim(w)) VIRTUAL, INDEX k_mx (mx), INDEX k_dm (dm), INDEX k_dot ((vsql_tvector.tvector_dot_product(v, w))))
+INSERT INTO vlc.li (v, w) VALUES ('[1,2,3]', '[3,2,1]'), ('[0.5,9,-1]', '[2,2,2]'), ('[-4,0,4]', '[1,0,1]')
+INSERT INTO vlc.li (v, w) SELECT vsql_tvector.tvector_add(v, w), v FROM vlc.li ORDER BY id DESC LIMIT 5
+UPDATE vlc.li SET v = vsql_tvector.tvector_add(v, w) WHERE id % 3 = 0
+UPDATE vlc.li SET w = v, v = w WHERE id % 4 = 1
+DELETE FROM vlc.li ORDER BY id LIMIT 2
+SELECT id, mx FROM vlc.li FORCE INDEX (k_mx) WHERE mx > 2 LIMIT 10
+SELECT COUNT(*) FROM vlc.li FORCE INDEX (k_dm) WHERE dm = 3
+SELECT id FROM vlc.li FORCE INDEX (k_dot) WHERE vsql_tvector.tvector_dot_product(v, w) > 5 LIMIT 10
+ALTER TABLE vlc.li ADD INDEX k_max ((vsql_tvector.tvector_max_element(w)))
+ALTER TABLE vlc.li DROP INDEX k_max
+ALTER TABLE vlc.li ADD COLUMN mn DOUBLE AS (vsql_tvector.tvector_min_element(v)) VIRTUAL, ADD INDEX k_mn (mn)
+ALTER TABLE vlc.li DROP COLUMN mn
+CREATE TABLE IF NOT EXISTS vlc.lci (id INT AUTO_INCREMENT PRIMARY KEY, c COMPLEX, ab DOUBLE AS (vsql_complex.complex_abs(c)) VIRTUAL, INDEX k_ab (ab), INDEX k_re ((vsql_complex.complex_real(c))))
+INSERT INTO vlc.lci (c) VALUES ('(1,2)'), ('(3,4)'), ('(-5,0.5)')
+UPDATE vlc.lci SET c = vsql_complex.complex_conjugate(c) WHERE id % 2 = 0
+SELECT COUNT(*) FROM vlc.lci FORCE INDEX (k_ab) WHERE ab > 2
+DROP TABLE IF EXISTS vlc.li
+DROP TABLE IF EXISTS vlc.lci
