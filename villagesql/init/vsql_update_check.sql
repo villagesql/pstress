@@ -48,3 +48,11 @@ SELECT COUNT(update_test.counter_double(val)) INTO @ut_n FROM vupd.ut1;
 SELECT COUNT(update_schema_test.MYTYPE::to_string(val)) INTO @ut_n FROM vupd.ut2;
 SELECT COUNT(update_length_test.FIX::to_string(f)),
        COUNT(update_length_test.VAR::to_string(v)) INTO @ut_n, @ut_m FROM vupd.ut3;
+
+-- p_ut_lit's literals, 7 and 9, doubled (1.x) or tripled (2.0.0) by the
+-- version installed when it ran.
+SELECT CONCAT('FAIL ', src, ' logged ', r, ' (row ', id, ')')
+  FROM vupd.ut_log
+  WHERE (src = 'p_ut_lit def' AND r NOT IN (14, 21))
+     OR (src = 'p_ut_lit set' AND r NOT IN (18, 27))
+  ORDER BY id LIMIT 5;

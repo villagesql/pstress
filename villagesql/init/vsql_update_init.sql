@@ -111,13 +111,14 @@ CREATE TRIGGER ut1_ai AFTER INSERT ON ut1 FOR EACH ROW
 
 -- A custom-type routine variable with a DEFAULT and a SET literal: the
 -- variable table is rebuilt on every CALL, the literals are reused.
+-- vsql_update_check.sql checks the logged values.
 DELIMITER //
 CREATE PROCEDURE p_ut_lit()
 BEGIN
   DECLARE c update_test.COUNTER DEFAULT '7';
-  INSERT INTO ut_log (src, r) VALUES ('p_ut_lit', update_test.counter_double(c));
+  INSERT INTO ut_log (src, r) VALUES ('p_ut_lit def', update_test.counter_double(c));
   SET c = '9';
-  INSERT INTO ut_log (src, r) VALUES ('p_ut_lit', update_test.counter_double(c));
+  INSERT INTO ut_log (src, r) VALUES ('p_ut_lit set', update_test.counter_double(c));
 END//
 DELIMITER ;
 

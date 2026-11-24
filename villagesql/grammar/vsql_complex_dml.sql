@@ -62,6 +62,7 @@ UPDATE vsql.vc1 SET c = (SELECT COMPLEX::from_string(CONCAT('(', T1_INT_1, ',', 
 CALL vsql.p_vc_lit()
 CALL vsql.p_vc_lit()
 SELECT vsql.f_vc_lit(id) FROM vsql.vc1 LIMIT 20
+INSERT INTO vsql.vc_log (src, r) SELECT 'f_vc_lit', vsql.f_vc_lit(id) - id FROM vsql.vc1 LIMIT 20
 SELECT vsql.f_vc_conj('(1,2)') FROM vsql.vc1 LIMIT 20
 SELECT complex_real(vsql.f_vc_conj('(0.5,-1.5)')) FROM vsql.vc2 LIMIT 20
 INSERT INTO vsql.vc2 (grp, c) VALUES (FLOOR(RAND() * 10), '(1,2)')
@@ -70,6 +71,11 @@ EXECUTE ps_vc_lit_ins
 FLUSH TABLES vsql.vc2
 EXECUTE ps_vc_lit_ins
 DEALLOCATE PREPARE ps_vc_lit_ins
+PREPARE ps_vc_lit_log FROM 'INSERT INTO vsql.vc_log (src, c) VALUES (''ps_vc_lit'', ''(5.5,6.5)'')'
+EXECUTE ps_vc_lit_log
+FLUSH TABLES vsql.vc_log
+EXECUTE ps_vc_lit_log
+DEALLOCATE PREPARE ps_vc_lit_log
 PREPARE ps_vc_lit_sel FROM 'SELECT id FROM vsql.vc1 WHERE c = ''(1,2)'' OR c IN (''(3,4)'', ''(5,6)'') LIMIT 10'
 EXECUTE ps_vc_lit_sel
 FLUSH TABLES vsql.vc1

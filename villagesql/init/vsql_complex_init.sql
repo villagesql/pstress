@@ -92,15 +92,18 @@ CREATE TRIGGER vc1_au AFTER UPDATE ON vc1 FOR EACH ROW
 -- statement that runs more than once: a routine variable's DEFAULT and SET
 -- (the variable table is rebuilt on every CALL), a function called once per
 -- row, and a trigger. The literal must not keep bytes owned by a table that
--- is gone by the next execution.
+-- is gone by the next execution. The values logged under 'p_vc_lit def',
+-- 'p_vc_lit set', 'p_vc_lit cmp' and 'f_vc_lit' are known, and
+-- vsql_complex_check.sql checks them.
 DELIMITER //
 CREATE PROCEDURE p_vc_lit()
 BEGIN
   DECLARE a COMPLEX DEFAULT '(1.5,2.5)';
-  INSERT INTO vc_log (src, r, c) VALUES ('p_vc_lit', complex_real(a), a);
+  INSERT INTO vc_log (src, r, c) VALUES ('p_vc_lit def', complex_real(a), a);
   SET a = '(7,8)';
+  INSERT INTO vc_log (src, r, c) VALUES ('p_vc_lit set', complex_real(a), a);
   INSERT INTO vc_log (src, r, c)
-    SELECT 'p_vc_lit', COUNT(*), a FROM vc1 WHERE c = '(1,2)' OR c = a;
+    SELECT 'p_vc_lit cmp', COUNT(*), a FROM vc1 WHERE c = '(1,2)' OR c = a;
 END//
 CREATE FUNCTION f_vc_lit(n INT) RETURNS DOUBLE DETERMINISTIC
 BEGIN
