@@ -86,7 +86,7 @@ LIFECYCLE_BATCH=${LIFECYCLE_BATCH:-10}
 # prefix.
 CHECK_SQL=${CHECK_SQL:-}
 # 0: after a finding, start a fresh datadir instead of restarting on the
-# crashed one (no recovery test).
+# crashed one (no recovery test), and run CHECK_SQL at the end of each step.
 RECOVER=${RECOVER:-1}
 MYEXTRA=${MYEXTRA:-}
 # How mysqld reads option files. --no-defaults also skips mysqld-auto.cnf, so
@@ -513,6 +513,9 @@ while [ "$TRIAL" -lt "$TRIALS" ] || [ "$TRIALS" -eq 0 ]; do
       fresh_datadir; continue
     fi
   else
+    # Without recovery there may be no restart to run CHECK_SQL after, so
+    # run it on the live server before the step ends.
+    [ "$RECOVER" = 0 ] && run_check "$(err_size)"
     end_step
     if [ "$STEP" -ge "$STEPS_PER_DATADIR" ]; then fresh_datadir; continue; fi
     restart_for_recovery || { fresh_datadir; continue; }
