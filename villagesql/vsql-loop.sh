@@ -85,6 +85,9 @@ LIFECYCLE_BATCH=${LIFECYCLE_BATCH:-10}
 # RENDER<tab>prefix<tab>label<tab>value is a finding unless value starts with
 # prefix.
 CHECK_SQL=${CHECK_SQL:-}
+# 0: after a finding, start a fresh datadir instead of restarting on the
+# crashed one (no recovery test).
+RECOVER=${RECOVER:-1}
 MYEXTRA=${MYEXTRA:-}
 # How mysqld reads option files. --no-defaults also skips mysqld-auto.cnf, so
 # SET PERSIST values are lost on restart; "--defaults-file=/dev/null" reads
@@ -506,7 +509,7 @@ while [ "$TRIAL" -lt "$TRIALS" ] || [ "$TRIALS" -eq 0 ]; do
   fi
   if ! handle_result; then
     # Server is down after a finding: try recovery on the same datadir.
-    if [ ! -f "$RUNDIR/life/step_$STEP.dll" ] || ! restart_for_recovery; then
+    if [ "$RECOVER" = 0 ] || [ ! -f "$RUNDIR/life/step_$STEP.dll" ] || ! restart_for_recovery; then
       fresh_datadir; continue
     fi
   else
