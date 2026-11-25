@@ -14,7 +14,7 @@ SET @id = FLOOR(1 + RAND() * 320)
 SET @id = FLOOR(1 + RAND() * 320)
 SET @a = FLOOR(1 + RAND() * 320)
 SET @b = ELT(1 + FLOOR(RAND() * 3), 'x', 'y', 'z')
-PREPARE ps_k1_ins FROM 'INSERT INTO ci.k1 (grp, v, s) VALUES (?, ?, ''ps'')'
+PREPARE ps_k1_ins FROM 'INSERT INTO ci.k1 (grp, v, s) VALUES (IFNULL(?, 1), ?, ''ps'')'
 EXECUTE ps_k1_ins USING @g, @kv
 EXECUTE ps_k1_ins USING @g, @kv
 EXECUTE ps_k1_ins USING @g, @kv
@@ -52,8 +52,8 @@ PREPARE ps_k2_knn FROM 'SELECT a, b FROM ci.k2 ORDER BY vsql_knn_index_test.kvec
 EXECUTE ps_k2_knn USING @kv
 EXECUTE ps_k2_knn USING @kv
 DEALLOCATE PREPARE ps_k2_knn
-INSERT INTO ci.k1 (grp, v, s) VALUES (@g, '[1,1,1,1]', 'lit')
-INSERT INTO ci.k1 (grp, v, s) VALUES (@g, '[0,0,0,0]', 'zero'), (@g, '[1,-1,1,-1]', 'two')
+INSERT INTO ci.k1 (grp, v, s) VALUES (IFNULL(@g, 1), '[1,1,1,1]', 'lit')
+INSERT INTO ci.k1 (grp, v, s) VALUES (IFNULL(@g, 1), '[0,0,0,0]', 'zero'), (IFNULL(@g, 1), '[1,-1,1,-1]', 'two')
 INSERT INTO ci.k1 (grp, v, s) SELECT grp, v, 'copy' FROM ci.k1 ORDER BY id DESC LIMIT 5
 INSERT INTO ci.k1 (grp, v, s) SELECT 99, v, 'k3' FROM ci.k3 ORDER BY RAND() LIMIT 3
 UPDATE ci.k1 SET v = '[0,1,0,1]' WHERE id = @id
@@ -63,8 +63,8 @@ UPDATE ci.k1 SET s = CONCAT(s, 'u') WHERE id BETWEEN @id AND @id + 5
 DELETE FROM ci.k1 WHERE id = @id
 DELETE FROM ci.k1 WHERE grp = @g ORDER BY id LIMIT 3
 DELETE FROM ci.k1 WHERE id > 1000 LIMIT 5
-REPLACE INTO ci.k1 (id, grp, v, s) VALUES (@id, @g, '[2,0,0,0]', 'rep')
-INSERT INTO ci.k1 (id, grp, v) VALUES (@id, @g, '[3,0,0,0]') ON DUPLICATE KEY UPDATE v = VALUES(v), grp = grp + 1
+REPLACE INTO ci.k1 (id, grp, v, s) VALUES (@id, IFNULL(@g, 1), '[2,0,0,0]', 'rep')
+INSERT INTO ci.k1 (id, grp, v) VALUES (@id, IFNULL(@g, 1), '[3,0,0,0]') ON DUPLICATE KEY UPDATE v = VALUES(v), grp = grp + 1
 INSERT IGNORE INTO ci.k2 (a, b, v) VALUES (@a, @b, '[0.5,0.5,0.5,0.5]')
 UPDATE ci.k2 SET b = ELT(1 + FLOOR(RAND() * 3), 'x', 'y', 'z') WHERE a = @a
 UPDATE ci.k2 SET v = NULL WHERE a = @a
@@ -86,7 +86,7 @@ PREPARE ps_e1_upd FROM 'UPDATE ci.e1 SET a = ? WHERE id = ?'
 EXECUTE ps_e1_upd USING @e, @id
 DEALLOCATE PREPARE ps_e1_upd
 DELETE FROM ci.e1 WHERE id = @id
-SELECT id, LENGTH(a) FROM ci.e1 WHERE id = @id
+SELECT id, a FROM ci.e1 WHERE id = @id
 SELECT COUNT(*) FROM ci.e1 FORCE INDEX (ia)
 SELECT COUNT(*) FROM ci.k1
 SELECT COUNT(*) FROM ci.k2
@@ -122,6 +122,6 @@ SELECT id FROM ci.k1 ORDER BY vsql_knn_index_test.kvec_l2_distance(v, KVECTOR::f
 SELECT k.id FROM ci.k1 k JOIN ci.k3 t ON t.id = k.id ORDER BY vsql_knn_index_test.kvec_l2_distance(k.v, KVECTOR::from_string('[1,0,0,0]')) LIMIT 5
 SELECT id FROM ci.k1 WHERE id IN (SELECT id FROM ci.k3) ORDER BY vsql_knn_index_test.kvec_l2_distance(v, KVECTOR::from_string('[1,0,0,0]')) LIMIT 5
 SELECT grp, COUNT(*) FROM (SELECT grp FROM ci.k1 ORDER BY vsql_knn_index_test.kvec_l2_distance(v, KVECTOR::from_string('[1,0,0,0]')) LIMIT 20) d GROUP BY grp
-SELECT DISTINCT grp FROM ci.k1 ORDER BY vsql_knn_index_test.kvec_l2_distance(v, KVECTOR::from_string('[1,0,0,0]')) LIMIT 5
+SELECT DISTINCT grp FROM (SELECT grp FROM ci.k1 ORDER BY vsql_knn_index_test.kvec_l2_distance(v, KVECTOR::from_string('[1,0,0,0]')) LIMIT 5) t
 UPDATE ci.k1 SET s = 'near' ORDER BY vsql_knn_index_test.kvec_l2_distance(v, KVECTOR::from_string('[1,0,0,0]')) LIMIT 2
 DELETE FROM ci.k1 ORDER BY vsql_knn_index_test.kvec_l2_distance(v, KVECTOR::from_string('[1,0,0,0]')) LIMIT 1
