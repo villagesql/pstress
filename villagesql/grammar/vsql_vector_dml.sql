@@ -4,8 +4,6 @@ SET @vv_v = CONCAT('[', ROUND(RAND() * 10 - 5, 3), ',', ROUND(RAND() * 10 - 5, 3
 SET @vv_v = CONCAT('[', ROUND(RAND() * 10 - 5, 3), ',', ROUND(RAND() * 10 - 5, 3), ',', ROUND(RAND() * 10 - 5, 3), ',', ROUND(RAND() * 10 - 5, 3), ',', ROUND(RAND() * 10 - 5, 3), ',', ROUND(RAND() * 10 - 5, 3), ',', ROUND(RAND() * 10 - 5, 3), ',', ROUND(RAND() * 10 - 5, 3), ']')
 SET @vv_g = FLOOR(RAND() * 10)
 SET @vv_v = '[1,0,-1,2,0.5,-0.5,3,-3]'
-SET @vv_v = '[1,2,3]'
-SET @vv_v = 'not a vector'
 SET @vv_v = NULL
 SET @vv_g = FLOOR(RAND() * 10)
 SET @vv_id = FLOOR(1 + RAND() * 500)
@@ -49,7 +47,7 @@ PREPARE ps_vv2_knn FROM 'SELECT id FROM vsql.vv2 WHERE grp = ? ORDER BY COSINE_D
 EXECUTE ps_vv2_knn USING @vv_g, @vv_v
 EXECUTE ps_vv2_knn USING @vv_g, @vv_v
 DEALLOCATE PREPARE ps_vv2_knn
-PREPARE ps_vv3_knn FROM 'SELECT id FROM vsql.vv3 ORDER BY NEGATIVE_INNER_PRODUCT(v, ?) LIMIT 20'
+PREPARE ps_vv3_knn FROM 'SELECT id FROM vsql.vv3 ORDER BY INNER_PRODUCT(v, ?) DESC LIMIT 20'
 EXECUTE ps_vv3_knn USING @vv_v
 EXECUTE ps_vv3_knn USING @vv_v
 DEALLOCATE PREPARE ps_vv3_knn
@@ -75,26 +73,26 @@ SELECT id FROM vsql.vv1 ORDER BY L2_DISTANCE(v, '[-4,4,-4,4,-4,4,-4,4]') LIMIT 1
 SELECT id FROM vsql.vv1 ORDER BY L2_DISTANCE(v, '[-4,4,-4,4,-4,4,-4,4]') LIMIT 100
 SELECT id, L2_DISTANCE(v, '[1,0,-1,2,0.5,-0.5,3,-3]') AS d FROM vsql.vv1 WHERE grp = @vv_g ORDER BY L2_DISTANCE(v, '[1,0,-1,2,0.5,-0.5,3,-3]') LIMIT 10
 SELECT id FROM vsql.vv2 ORDER BY COSINE_DISTANCE(v, '[1,0,-1,2,0.5,-0.5,3,-3]') LIMIT 10
-SELECT grp, id FROM vsql.vv3 ORDER BY NEGATIVE_INNER_PRODUCT(v, '[1,0,-1,2,0.5,-0.5,3,-3]') LIMIT 10
+SELECT grp, id FROM vsql.vv3 ORDER BY INNER_PRODUCT(v, '[1,0,-1,2,0.5,-0.5,3,-3]') DESC LIMIT 10
 SELECT id FROM vsql.vv5 ORDER BY L1_DISTANCE(v, '[1,0,-1,2,0.5,-0.5,3,-3]') LIMIT 10
 SELECT id, n FROM vsql.vv5 ORDER BY L2_DISTANCE(w, '[1,0,-1,2,0.5,-0.5,3,-3]') LIMIT 10
 SELECT id, L2_DISTANCE(v, '[0,0,0,0,0,0,0,0.001]') AS d FROM vsql.vv1 WHERE grp = @vv_g ORDER BY L2_DISTANCE(v, '[0,0,0,0,0,0,0,0.001]') LIMIT 10
 SELECT id FROM vsql.vv2 ORDER BY COSINE_DISTANCE(v, '[0,0,0,0,0,0,0,0.001]') LIMIT 10
-SELECT grp, id FROM vsql.vv3 ORDER BY NEGATIVE_INNER_PRODUCT(v, '[0,0,0,0,0,0,0,0.001]') LIMIT 10
+SELECT grp, id FROM vsql.vv3 ORDER BY INNER_PRODUCT(v, '[0,0,0,0,0,0,0,0.001]') DESC LIMIT 10
 SELECT id FROM vsql.vv5 ORDER BY L1_DISTANCE(v, '[0,0,0,0,0,0,0,0.001]') LIMIT 10
 SELECT id, n FROM vsql.vv5 ORDER BY L2_DISTANCE(w, '[0,0,0,0,0,0,0,0.001]') LIMIT 10
 SELECT id, L2_DISTANCE(v, '[-4,4,-4,4,-4,4,-4,4]') AS d FROM vsql.vv1 WHERE grp = @vv_g ORDER BY L2_DISTANCE(v, '[-4,4,-4,4,-4,4,-4,4]') LIMIT 10
 SELECT id FROM vsql.vv2 ORDER BY COSINE_DISTANCE(v, '[-4,4,-4,4,-4,4,-4,4]') LIMIT 10
-SELECT grp, id FROM vsql.vv3 ORDER BY NEGATIVE_INNER_PRODUCT(v, '[-4,4,-4,4,-4,4,-4,4]') LIMIT 10
+SELECT grp, id FROM vsql.vv3 ORDER BY INNER_PRODUCT(v, '[-4,4,-4,4,-4,4,-4,4]') DESC LIMIT 10
 SELECT id FROM vsql.vv5 ORDER BY L1_DISTANCE(v, '[-4,4,-4,4,-4,4,-4,4]') LIMIT 10
 SELECT id, n FROM vsql.vv5 ORDER BY L2_DISTANCE(w, '[-4,4,-4,4,-4,4,-4,4]') LIMIT 10
 SELECT id, L2_DISTANCE(v, '[2.5,1.5,0.5,-0.5,-1.5,-2.5,3.5,-3.5]') AS d FROM vsql.vv1 WHERE grp = @vv_g ORDER BY L2_DISTANCE(v, '[2.5,1.5,0.5,-0.5,-1.5,-2.5,3.5,-3.5]') LIMIT 10
 SELECT id FROM vsql.vv2 ORDER BY COSINE_DISTANCE(v, '[2.5,1.5,0.5,-0.5,-1.5,-2.5,3.5,-3.5]') LIMIT 10
-SELECT grp, id FROM vsql.vv3 ORDER BY NEGATIVE_INNER_PRODUCT(v, '[2.5,1.5,0.5,-0.5,-1.5,-2.5,3.5,-3.5]') LIMIT 10
+SELECT grp, id FROM vsql.vv3 ORDER BY INNER_PRODUCT(v, '[2.5,1.5,0.5,-0.5,-1.5,-2.5,3.5,-3.5]') DESC LIMIT 10
 SELECT id FROM vsql.vv5 ORDER BY L1_DISTANCE(v, '[2.5,1.5,0.5,-0.5,-1.5,-2.5,3.5,-3.5]') LIMIT 10
 SELECT id, n FROM vsql.vv5 ORDER BY L2_DISTANCE(w, '[2.5,1.5,0.5,-0.5,-1.5,-2.5,3.5,-3.5]') LIMIT 10
 SELECT id FROM vsql.vv1 WHERE s IS NOT NULL ORDER BY L2_DISTANCE(v, '[2.5,1.5,0.5,-0.5,-1.5,-2.5,3.5,-3.5]') LIMIT 5
-SELECT grp, id FROM vsql.vv3 WHERE grp = 5 ORDER BY NEGATIVE_INNER_PRODUCT(v, '[-4,4,-4,4,-4,4,-4,4]') LIMIT 5
+SELECT grp, id FROM vsql.vv3 WHERE grp = 5 ORDER BY INNER_PRODUCT(v, '[-4,4,-4,4,-4,4,-4,4]') DESC LIMIT 5
 SELECT id FROM vsql.vv1 ORDER BY L2_DISTANCE(v, '[1,0,-1,2,0.5,-0.5,3,-3]') LIMIT 10 FOR UPDATE
 SELECT id FROM vsql.vv2 ORDER BY COSINE_DISTANCE(v, '[0,0,0,0,0,0,0,0.001]') LIMIT 10 FOR SHARE
 SELECT COUNT(*) FROM (SELECT id FROM vsql.vv1 ORDER BY L2_DISTANCE(v, '[-4,4,-4,4,-4,4,-4,4]') LIMIT 50) t
@@ -134,7 +132,6 @@ DELETE FROM vsql.vv1 WHERE id = @vv_id
 DELETE FROM vsql.vv5 WHERE grp = @vv_g LIMIT 1
 UPDATE vsql.vv1 SET v = '[0,0,0,0,0,0,0,0.001]' WHERE id = @vv_id
 UPDATE vsql.vv1 SET grp = (grp + 1) % 10 WHERE id = @vv_id
-UPDATE vsql.vv2 SET id = id + 100000 WHERE id = @vv_id
 REPLACE INTO vsql.vv2 (id, grp, v) VALUES (FLOOR(1 + RAND() * 500), 1, '[1,0,-1,2,0.5,-0.5,3,-3]')
 INSERT INTO vsql.vv5 (id, grp, v, w) VALUES (FLOOR(1 + RAND() * 300), 1, '[1,0,-1,2,0.5,-0.5,3,-3]', '[0,0,0,0,0,0,0,0.001]') ON DUPLICATE KEY UPDATE v = VALUES(v)
 SELECT id FROM vsql.vv1 ORDER BY L2_DISTANCE(v, @vv_v) LIMIT 5

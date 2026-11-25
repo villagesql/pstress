@@ -106,6 +106,112 @@ CREATE TRIGGER vv5_bi BEFORE INSERT ON vv5 FOR EACH ROW
 CREATE TRIGGER vv1_au AFTER UPDATE ON vv1 FOR EACH ROW
   INSERT INTO vv_log (src, ref, r) VALUES ('vv1_au', NEW.id, VECTOR_NORM(NEW.v));
 
+-- One row per p_vv_chk call; init/vsql_vector_check.sql reports them after
+-- every restart and marks them seen.
+CREATE TABLE vv_chk (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  t VARCHAR(8) NOT NULL,
+  self_q INT NOT NULL,
+  lim INT NOT NULL,
+  ef INT,
+  n_rows INT,
+  c INT,
+  cd INT,
+  ordered INT,
+  hit INT,
+  mind DOUBLE,
+  q VARCHAR(200),
+  seen INT NOT NULL DEFAULT 0
+);
+
+DELIMITER //
+
+-- Checks one KNN query against the HNSW index of t ('vv1', 'vv2', 'vv5' for its
+-- v column, 'vv5w' for its w column; no query uses vv3's inner product index) in one REPEATABLE READ snapshot.
+-- HNSW is approximate, so only some properties must hold for every query:
+-- no row twice (cd = c) and rows in distance order (ordered = 1). Recall
+-- against the same query without the index (hit of lim), short results
+-- (c < lim with enough rows) and a query with an existing row's vector that
+-- misses it (self_q = 1, mind > 0) are logged for the check to summarize.
+-- The query vector is random, or with self_q = 1 an existing row's vector.
+-- Commits the caller's transaction first.
+CREATE PROCEDURE p_vv_chk(tt VARCHAR(8), self_q INT, lim INT)
+BEGIN
+  DECLARE iso VARCHAR(32) DEFAULT @@SESSION.transaction_isolation;
+  DECLARE t VARCHAR(8) DEFAULT tt;
+  DECLARE fn VARCHAR(32) DEFAULT 'L2_DISTANCE';
+  DECLARE col VARCHAR(4) DEFAULT 'v';
+  DECLARE ix VARCHAR(4) DEFAULT 'iv';
+  DECLARE EXIT HANDLER FOR SQLEXCEPTION
+  BEGIN
+    ROLLBACK;
+    SET SESSION transaction_isolation = iso;
+    RESIGNAL;
+  END;
+  CASE tt
+    WHEN 'vv2' THEN SET fn = 'COSINE_DISTANCE';
+    WHEN 'vv5' THEN SET fn = 'L1_DISTANCE';
+    WHEN 'vv5w' THEN SET t = 'vv5', col = 'w', ix = 'iw';
+    ELSE SET t = 'vv1';
+  END CASE;
+  COMMIT;
+  SET SESSION transaction_isolation = 'REPEATABLE-READ';
+  START TRANSACTION WITH CONSISTENT SNAPSHOT;
+
+  SET @p_vv_q = NULL;
+  IF self_q = 1 THEN
+    -- 9 significant digits give back the stored float exactly.
+    SET @s = CONCAT('SELECT FLOOR(1 + RAND() * MAX(id)) INTO @p_vv_id FROM vsql.', t);
+    PREPARE p_vv_s FROM @s;
+    EXECUTE p_vv_s;
+    DEALLOCATE PREPARE p_vv_s;
+    SET @s = CONCAT('SELECT VECTOR_FORMAT(', col, ', 9) INTO @p_vv_q FROM vsql.', t,
+                    ' WHERE id >= ? ORDER BY id LIMIT 1');
+    PREPARE p_vv_s FROM @s;
+    EXECUTE p_vv_s USING @p_vv_id;
+    DEALLOCATE PREPARE p_vv_s;
+  END IF;
+  IF @p_vv_q IS NULL THEN
+    SET self_q = 0;
+    SET @p_vv_q = CONCAT('[', ROUND(RAND() * 10 - 5, 3), ',', ROUND(RAND() * 10 - 5, 3), ',',
+                         ROUND(RAND() * 10 - 5, 3), ',', ROUND(RAND() * 10 - 5, 3), ',',
+                         ROUND(RAND() * 10 - 5, 3), ',', ROUND(RAND() * 10 - 5, 3), ',',
+                         ROUND(RAND() * 10 - 5, 3), ',', ROUND(RAND() * 10 - 5, 3), ']');
+  END IF;
+
+  SET @s = CONCAT('SELECT COUNT(*) INTO @p_vv_n FROM vsql.', t);
+  PREPARE p_vv_s FROM @s;
+  EXECUTE p_vv_s;
+  DEALLOCATE PREPARE p_vv_s;
+
+  -- The derived table keeps the scan order, so the GROUP_CONCAT without
+  -- ORDER BY lists the distances in the order the index returned them.
+  SET @s = CONCAT('SELECT COUNT(*), COUNT(DISTINCT id), ',
+                  'GROUP_CONCAT(ROUND(d, 4)) <=> GROUP_CONCAT(ROUND(d, 4) ORDER BY d), MIN(d) ',
+                  'INTO @p_vv_c, @p_vv_cd, @p_vv_ord, @p_vv_mind ',
+                  'FROM (SELECT id, ', fn, '(', col, ', ?) AS d FROM vsql.', t,
+                  ' ORDER BY ', fn, '(', col, ', ?) LIMIT ', lim, ') k');
+  PREPARE p_vv_s FROM @s;
+  EXECUTE p_vv_s USING @p_vv_q, @p_vv_q;
+  DEALLOCATE PREPARE p_vv_s;
+
+  SET @s = CONCAT('SELECT COUNT(*) INTO @p_vv_hit FROM ',
+                  '(SELECT id FROM vsql.', t, ' ORDER BY ', fn, '(', col, ', ?) LIMIT ', lim, ') a ',
+                  'JOIN (SELECT id FROM vsql.', t, ' IGNORE INDEX (', ix, ') ORDER BY ', fn, '(', col,
+                  ', ?) LIMIT ', lim, ') b ON a.id = b.id');
+  PREPARE p_vv_s FROM @s;
+  EXECUTE p_vv_s USING @p_vv_q, @p_vv_q;
+  DEALLOCATE PREPARE p_vv_s;
+
+  INSERT INTO vsql.vv_chk (t, self_q, lim, ef, n_rows, c, cd, ordered, hit, mind, q)
+  VALUES (tt, self_q, lim, @@SESSION.vsql_vector.ef_search, @p_vv_n, @p_vv_c, @p_vv_cd,
+          @p_vv_ord, @p_vv_hit, @p_vv_mind, @p_vv_q);
+  COMMIT;
+  SET SESSION transaction_isolation = iso;
+END//
+
+DELIMITER ;
+
 CALL p_vv_seed(500);
 
 INSERT INTO vv2 (grp, v) SELECT grp, v FROM vv1;
