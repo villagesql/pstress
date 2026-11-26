@@ -9,6 +9,11 @@
 -- statement parameters, so computed text goes in through PREPARE ... USING.
 -- Every index is declared before any rows exist: the server cannot build a
 -- custom index over rows or rebuild the table.
+--
+-- An index keeps memtable_docs row versions in memory and then writes them
+-- out as a segment. tx1, tx3, tx5 and tx6 use small values so that DML,
+-- rollback, locking reads and recovery act on segment documents; tx2 and tx4
+-- keep the default.
 
 SET PERSIST vsql_allow_preview_extensions = ON;
 INSTALL EXTENSION vsql_textsearch;
@@ -21,7 +26,7 @@ CREATE TABLE tx1 (
   id INT PRIMARY KEY,
   body doc,
   txt VARCHAR(3000),
-  INDEX ib (body) USING EXTENDED(vsql_textsearch.bm25) WITH (analyzer = 'simple')
+  INDEX ib (body) USING EXTENDED(vsql_textsearch.bm25) WITH (analyzer = 'simple', memtable_docs = 50)
 );
 
 -- english analyzer (stopwords, stemming): membership is not checked.
@@ -32,14 +37,15 @@ CREATE TABLE tx2 (
   INDEX ib (body) USING EXTENDED(vsql_textsearch.bm25)
 );
 
--- Composite primary key with a variable-length part.
+-- Composite primary key with a variable-length part. Every row version is
+-- written out as its own segment.
 CREATE TABLE tx3 (
   a INT NOT NULL,
   b VARCHAR(20) NOT NULL,
   body doc,
   txt VARCHAR(3000),
   PRIMARY KEY (a, b),
-  INDEX ib (body) USING EXTENDED(vsql_textsearch.bm25) WITH (analyzer = 'simple')
+  INDEX ib (body) USING EXTENDED(vsql_textsearch.bm25) WITH (analyzer = 'simple', memtable_docs = 1)
 );
 
 -- Hidden row id primary key.
@@ -54,7 +60,7 @@ CREATE TABLE tx5 (
   id INT PRIMARY KEY,
   body doc,
   txt VARCHAR(3000),
-  INDEX ib (body) USING EXTENDED(vsql_textsearch.bm25) WITH (analyzer = 'simple', k1 = '2.0', b = '0.3')
+  INDEX ib (body) USING EXTENDED(vsql_textsearch.bm25) WITH (analyzer = 'simple', k1 = '2.0', b = '0.3', memtable_docs = 7)
 );
 
 -- The vocabulary of the checked tables: no word is a substring of another,
@@ -83,6 +89,47 @@ CREATE TABLE tx_log (
   ref INT,
   r DOUBLE
 );
+
+-- An index lists its segments in one root page until segments are merged,
+-- so a table with a small memtable_docs takes only so many row versions.
+-- Triggers call p_tx_budget for every row written to tx1, tx3 and tx5; it
+-- fails the statement once the table has used base + per_sec * (seconds
+-- since init) row versions. Rolled-back writes count too: an AUTO_INCREMENT
+-- value is not given back. A datadir lives about 550 seconds.
+CREATE TABLE tx_budget (t VARCHAR(4) PRIMARY KEY, base INT, per_sec INT, start DATETIME);
+INSERT INTO tx_budget VALUES ('tx1', 6000, 60, NOW()), ('tx3', 300, 1, NOW()), ('tx5', 2000, 6, NOW());
+CREATE TABLE tx_seq1 (id INT AUTO_INCREMENT PRIMARY KEY);
+CREATE TABLE tx_seq3 (id INT AUTO_INCREMENT PRIMARY KEY);
+CREATE TABLE tx_seq5 (id INT AUTO_INCREMENT PRIMARY KEY);
+
+DELIMITER //
+
+CREATE PROCEDURE p_tx_budget(tt VARCHAR(4))
+BEGIN
+  DECLARE cap INT;
+  CASE tt
+    WHEN 'tx1' THEN INSERT INTO vsql.tx_seq1 VALUES (NULL);
+    WHEN 'tx3' THEN INSERT INTO vsql.tx_seq3 VALUES (NULL);
+    ELSE INSERT INTO vsql.tx_seq5 VALUES (NULL);
+  END CASE;
+  SELECT base + per_sec * TIMESTAMPDIFF(SECOND, start, NOW()) INTO cap
+    FROM vsql.tx_budget WHERE t = tt;
+  IF LAST_INSERT_ID() > cap THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'write budget of the table used up for now';
+  END IF;
+END//
+
+CREATE TRIGGER tx1_bi BEFORE INSERT ON tx1 FOR EACH ROW CALL p_tx_budget('tx1')//
+CREATE TRIGGER tx1_bu BEFORE UPDATE ON tx1 FOR EACH ROW CALL p_tx_budget('tx1')//
+CREATE TRIGGER tx1_bd BEFORE DELETE ON tx1 FOR EACH ROW CALL p_tx_budget('tx1')//
+CREATE TRIGGER tx3_bi BEFORE INSERT ON tx3 FOR EACH ROW CALL p_tx_budget('tx3')//
+CREATE TRIGGER tx3_bu BEFORE UPDATE ON tx3 FOR EACH ROW CALL p_tx_budget('tx3')//
+CREATE TRIGGER tx3_bd BEFORE DELETE ON tx3 FOR EACH ROW CALL p_tx_budget('tx3')//
+CREATE TRIGGER tx5_bi BEFORE INSERT ON tx5 FOR EACH ROW CALL p_tx_budget('tx5')//
+CREATE TRIGGER tx5_bu BEFORE UPDATE ON tx5 FOR EACH ROW CALL p_tx_budget('tx5')//
+CREATE TRIGGER tx5_bd BEFORE DELETE ON tx5 FOR EACH ROW CALL p_tx_budget('tx5')//
+
+DELIMITER ;
 
 DELIMITER //
 
@@ -375,6 +422,7 @@ CREATE TABLE tx_chk (
   extra INT,
   missing INT,
   bad_text INT,
+  note VARCHAR(200),
   k_idx MEDIUMTEXT,
   seen INT NOT NULL DEFAULT 0
 );
@@ -574,6 +622,86 @@ BEGIN
   END WHILE;
 END//
 
+-- Reads every match of a random query on t (tx1, tx3, tx5 or tx6) twice in
+-- one REPEATABLE READ snapshot, secs seconds apart while other sessions write
+-- and the index writes out segments, then the rows that have a query word.
+-- All three key lists must be equal. Commits the caller's transaction first.
+CREATE PROCEDURE p_tx_snap(t VARCHAR(4), secs INT)
+BEGIN
+  DECLARE iso VARCHAR(32) DEFAULT @@SESSION.transaction_isolation;
+  DECLARE q VARCHAR(200) DEFAULT f_tx_query(t);
+  DECLARE k VARCHAR(64) DEFAULT IF(t = 'tx3', 'CONCAT(a, '':'', b)', 'id');
+  DECLARE EXIT HANDLER FOR SQLEXCEPTION
+  BEGIN
+    ROLLBACK;
+    SET SESSION transaction_isolation = iso;
+    RESIGNAL;
+  END;
+  COMMIT;
+  SET SESSION transaction_isolation = 'REPEATABLE-READ';
+  SET SESSION group_concat_max_len = 16 * 1024 * 1024;
+  START TRANSACTION WITH CONSISTENT SNAPSHOT;
+  SET @p_tx_q = q;
+  SET @s = CONCAT('SELECT COUNT(*) - COUNT(DISTINCT k), GROUP_CONCAT(k ORDER BY k) INTO @p_tx_d1, @p_tx_k1 FROM (SELECT ',
+                  k, ' AS k FROM vsql.', t, ' ORDER BY bm25_distance(body, ?) LIMIT 1000000) x');
+  PREPARE p_tx_s FROM @s;
+  EXECUTE p_tx_s USING @p_tx_q;
+  DEALLOCATE PREPARE p_tx_s;
+  DO SLEEP(secs);
+  SET @s = REPLACE(REPLACE(@s, '@p_tx_d1', '@p_tx_d2'), '@p_tx_k1', '@p_tx_k2');
+  PREPARE p_tx_s FROM @s;
+  EXECUTE p_tx_s USING @p_tx_q;
+  DEALLOCATE PREPARE p_tx_s;
+  SET @s = CONCAT('SELECT COUNT(*), GROUP_CONCAT(k ORDER BY k) INTO @p_tx_n, @p_tx_k3 FROM (SELECT ',
+                  k, ' AS k FROM vsql.', t, ' WHERE ', f_tx_match(q), ') x');
+  PREPARE p_tx_s FROM @s;
+  EXECUTE p_tx_s;
+  DEALLOCATE PREPARE p_tx_s;
+  COMMIT;
+  SET SESSION transaction_isolation = iso;
+  INSERT INTO vsql.tx_chk (src, t, q, lim, filt, iso, n_exp, c_idx, dups, ordered, extra, missing,
+                           bad_text, note, k_idx)
+  VALUES ('snap', t, q, 0, 0, 'REPEATABLE-READ', @p_tx_n,
+          IFNULL(LENGTH(@p_tx_k2) - LENGTH(REPLACE(@p_tx_k2, ',', '')) + 1, 0),
+          @p_tx_d1 + @p_tx_d2, 1, NOT (@p_tx_k1 <=> @p_tx_k2), NOT (@p_tx_k2 <=> @p_tx_k3), 0,
+          NULLIF(CONCAT_WS('; ', IF(@p_tx_k1 <=> @p_tx_k2, NULL, CONCAT('the reads ', secs, 's apart differ')),
+                           IF(@p_tx_k2 <=> @p_tx_k3, NULL, 'the index differs from REGEXP')), ''),
+          IF(@p_tx_k1 <=> @p_tx_k2 AND @p_tx_k2 <=> @p_tx_k3, NULL,
+             CONCAT('first ', LEFT(@p_tx_k1, 300), ' second ', LEFT(@p_tx_k2, 300), ' regexp ', LEFT(@p_tx_k3, 300))));
+END//
+
+-- Drops tx6 and creates it again with memtable_docs = 1, then inserts n
+-- rows: a burst of segment writes for kill -9 to interrupt. One burst runs
+-- at a time; a call while another runs does nothing.
+CREATE PROCEDURE p_tx_burst(n INT)
+BEGIN
+  DECLARE EXIT HANDLER FOR SQLEXCEPTION
+  BEGIN
+    DO RELEASE_LOCK('vsql_tx_burst');
+    RESIGNAL;
+  END;
+  IF GET_LOCK('vsql_tx_burst', 0) THEN
+    DROP TABLE IF EXISTS vsql.tx6;
+    CREATE TABLE vsql.tx6 (
+      id INT PRIMARY KEY,
+      body doc,
+      txt VARCHAR(3000),
+      INDEX ib (body) USING EXTENDED(vsql_textsearch.bm25) WITH (analyzer = 'simple', memtable_docs = 1)
+    );
+    CALL p_tx_ins('tx6', n, 100000);
+    DO RELEASE_LOCK('vsql_tx_burst');
+  END IF;
+END//
+
+-- The checks of tx6, when it exists.
+CREATE PROCEDURE p_tx_chk6()
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'vsql' AND table_name = 'tx6') THEN
+    CALL p_tx_words('tx6');
+    CALL p_tx_chk('tx6', NULL, 10, 1, ' FOR SHARE', 1);
+  END IF;
+END//
+
 -- Procedures must not return result sets: pstress reads only the first result
 -- of a CALL, which leaves its connection out of sync for the rest of the run.
 CREATE PROCEDURE p_tx_rank(t VARCHAR(4), lim INT)
@@ -592,6 +720,7 @@ DELIMITER ;
 
 CALL p_tx_ins('tx1', 4000, 6000);
 CALL p_tx_ins('tx2', 2500, 3000);
-CALL p_tx_ins('tx3', 2500, 3000);
+CALL p_tx_ins('tx3', 250, 3000);
 CALL p_tx_ins('tx4', 2000, 3000);
-CALL p_tx_ins('tx5', 2500, 3000);
+CALL p_tx_ins('tx5', 1500, 3000);
+CALL p_tx_burst(100);

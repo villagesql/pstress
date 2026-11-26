@@ -5,7 +5,7 @@
 -- Runs p_tx_chk (init/vsql_textsearch_init.sql) on every table: ranked reads
 -- of random queries with and without a limit and a filter, locking reads
 -- compared with the same locking read by REGEXP, and every vocabulary word
--- on the simple-analyzer tables. Then reports the p_tx_chk rows not reported
+-- on the simple-analyzer tables, tx6 included when a burst left it. Then reports the p_tx_chk rows not reported
 -- yet, from these calls and from the grammar.
 
 CALL vsql.p_tx_xa_end();
@@ -36,14 +36,16 @@ CALL vsql.p_tx_words('tx1');
 CALL vsql.p_tx_words('tx3');
 CALL vsql.p_tx_words('tx4');
 CALL vsql.p_tx_words('tx5');
+CALL vsql.p_tx_chk6();
 
 SELECT CONCAT('FAIL p_tx_chk ', src, IF(lck = '', '', CONCAT(' ', lck)), ' ', iso, ' ', t,
               ' row ', id, ' lim=', lim, ' filt=', filt, IF(src = 'lchk', IF(full_cmp, ' full', ' load'), ''),
               ' q=', q, ': ',
+              IF(note IS NULL, '', CONCAT(note, ' ')),
               IF(dups > 0, CONCAT(dups, ' rows returned twice '), ''),
               IF(NOT ordered, 'rows out of distance order ', ''),
-              IF(extra > 0, CONCAT(extra, ' rows without a query word or gone '), ''),
-              IF(missing <> 0, CONCAT(missing, ' matching rows missing '), ''),
+              IF(extra > 0 AND src <> 'snap', CONCAT(extra, ' rows without a query word or gone '), ''),
+              IF(missing <> 0 AND src <> 'snap', CONCAT(missing, ' matching rows missing '), ''),
               IF(bad_text > 0, CONCAT(bad_text, ' rows with other text '), ''),
               'index ', c_idx, ' expected ', IFNULL(n_exp, '-'), ' ',
               IF(k_idx IS NULL, '', CONCAT('index k ', LEFT(k_idx, 600))))
@@ -52,7 +54,7 @@ SELECT CONCAT('FAIL p_tx_chk ', src, IF(lck = '', '', CONCAT(' ', lck)), ' ', is
   ORDER BY id LIMIT 5;
 
 SELECT CONCAT('INFO p_tx_chk: ', SUM(src = 'chk'), ' reads, ', SUM(src = 'lchk'), ' locking reads (',
-              SUM(full_cmp AND src = 'lchk'), ' full), ',
+              SUM(full_cmp AND src = 'lchk'), ' full), ', SUM(src = 'snap'), ' snapshots, ',
               IFNULL(SUM(dups > 0 OR NOT ordered OR extra > 0 OR missing <> 0 OR bad_text > 0), 0), ' mismatches')
   FROM vsql.tx_chk WHERE seen = 0;
 
