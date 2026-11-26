@@ -38,6 +38,37 @@ CALL vsql.p_tx_words('tx4');
 CALL vsql.p_tx_words('tx5');
 CALL vsql.p_tx_chk6();
 
+-- Every index was opened by the reads above. It must have the
+-- memtable_docs and segments_per_level of its CREATE INDEX after a restart.
+SELECT CONCAT('FAIL bm25 settings of ', x.t, ': memtable_docs ', x.memtable_docs, ' segments_per_level ',
+              x.segments_per_level, ', created with ', o.memtable_docs, ' and ', o.segments_per_level)
+  FROM vsql.tx_idx x JOIN vsql.tx_opt o ON o.t = x.t
+  WHERE x.memtable_docs <> o.memtable_docs OR x.segments_per_level <> o.segments_per_level;
+SELECT CONCAT('FAIL bm25 index of ', o.t, ' not loaded after its reads')
+  FROM vsql.tx_opt o
+  WHERE o.t <> 'tx6' AND NOT EXISTS (SELECT 1 FROM vsql.tx_idx x WHERE x.t = o.t);
+
+-- The segments of each index: level:docs/live, newest last.
+SELECT CONCAT('INFO bm25 ', SUBSTRING_INDEX(MAX(it.NAME), '/', -1), ' live ', MAX(j.live), ' memtable ',
+              MAX(j.mt), ' segments ',
+              IFNULL(GROUP_CONCAT(CONCAT('L', s.lvl, ':', s.docs, '/', s.live) ORDER BY s.n SEPARATOR ' '), '-'))
+  FROM JSON_TABLE(bm25_indexes(), '$[*]' COLUMNS (space INT PATH '$.space', live INT PATH '$.live_versions',
+                  mt INT PATH '$.memtable', segments JSON PATH '$.segments')) j
+  JOIN INFORMATION_SCHEMA.INNODB_TABLES it ON it.SPACE = j.space AND it.NAME LIKE 'vsql/tx_'
+  LEFT JOIN JSON_TABLE(j.segments, '$[*]' COLUMNS (n FOR ORDINALITY, lvl INT PATH '$.level',
+                       docs INT PATH '$.docs', live INT PATH '$.live')) s ON TRUE
+  GROUP BY j.space ORDER BY 1;
+
+-- A merge drops segments whose documents are all dead, including those
+-- already dead when the index opened.
+CALL vsql.p_tx_maint('tx3', 2);
+CALL vsql.p_tx_maint('tx6', 2);
+SELECT CONCAT('FAIL bm25 ', t, ' keeps ', dead, ' segments without live documents after bm25_merge')
+  FROM (SELECT t, (SELECT COUNT(*) FROM JSON_TABLE(bm25_status(id), '$.segments[*]' COLUMNS (live INT PATH '$.live')) s
+                    WHERE s.live = 0) AS dead
+          FROM vsql.tx_idx WHERE t IN ('tx3', 'tx6')) x
+  WHERE dead > 0;
+
 SELECT CONCAT('FAIL p_tx_chk ', src, IF(lck = '', '', CONCAT(' ', lck)), ' ', iso, ' ', t,
               ' row ', id, ' lim=', lim, ' filt=', filt, IF(src = 'lchk', IF(full_cmp, ' full', ' load'), ''),
               ' q=', q, ': ',
@@ -57,6 +88,9 @@ SELECT CONCAT('INFO p_tx_chk: ', SUM(src = 'chk'), ' reads, ', SUM(src = 'lchk')
               SUM(full_cmp AND src = 'lchk'), ' full), ', SUM(src = 'snap'), ' snapshots, ',
               IFNULL(SUM(dups > 0 OR NOT ordered OR extra > 0 OR missing <> 0 OR bad_text > 0), 0), ' mismatches')
   FROM vsql.tx_chk WHERE seen = 0;
+
+SELECT CONCAT('INFO p_tx_pick read txt as a binary string ', COUNT(*), ' times')
+  FROM vsql.tx_log WHERE src = 'binary txt' HAVING COUNT(*) > 0;
 
 UPDATE vsql.tx_chk SET seen = 1 WHERE seen = 0;
 DELETE FROM vsql.tx_chk WHERE seen = 1 AND id < (SELECT m FROM (SELECT MAX(id) - 100000 AS m FROM vsql.tx_chk) x);
