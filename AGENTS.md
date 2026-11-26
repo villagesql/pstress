@@ -78,7 +78,7 @@ sleep: `caffeinate -dimsu villagesql/vsql-loop.sh ...`.
 | `vsql_caps` | query hooks, status counters, extension threads, MySQL services | slow_query_log, usage_counter, thread_worker_test, lifecycle_test, mysql_services_session_test |
 | `vsql_cidx` | custom indexes from the test extensions | knn_index_test, index_test, ext_index_test |
 | `vsql_vector` | vsql_vector SVECTOR and HNSW: DML, KNN, transactions | vsql_vector |
-| `vsql_cube` | vsql_cube R-tree: exact KNN checks, rollbacks, locking reads | vsql_cube (built with `-DVSQL_CUBE_RTREE=ON`) |
+| `vsql_cube` | vsql_cube R-tree: exact KNN checks, rollbacks, locking reads | vsql_cube built with `-DVSQL_CUBE_RTREE=ON`; set `VEB_SRC_DIR` to its build directory |
 
 Each conf file's header says what its grammars cover, which statements are
 left out and why (known bugs), and how to add them back.
@@ -121,6 +121,63 @@ the finding) and the INFO lines from CHECK_SQL. Findings are kinds `crash`,
 
 CHECK_SQL contract: a printed line starting with `FAIL`, or any SQL error, is
 a finding; lines starting with `INFO` go to the loop log.
+
+## Adding a workload
+
+The loop has no code for any one extension: a workload is a conf file and
+the SQL it names. To stress a new extension or feature, copy the closest
+workload and change it.
+
+| Feature | Start from |
+|---|---|
+| column type | an entry in `custom_types.json`, run with `vsql_types` |
+| exact index | `vsql_cube` |
+| approximate (ANN) index | `vsql_vector` |
+| hook, capability or extension thread | `vsql_caps` |
+| system variables | `vsql_sessvar` |
+| extension versions | `vsql_update` |
+
+A new column type often needs no other file: describe its column clause,
+literals and WHERE and UPDATE expressions in `custom_types.json` (or a copy
+passed with `CUSTOM_TYPES`) and pstress uses it in its random tables,
+queries and indexes.
+
+Otherwise a workload has four files:
+
+- `conf/vsql_<x>.conf` sets `RUNDIR`, `GRAMMAR`, `INIT_SQL`, `CHECK_SQL`,
+  `VEB_FILES` and, as needed, `VEB_SRC_DIR`, `MYEXTRA`, `ERR_FAIL_PATTERN`
+  and `LIFECYCLE_GRAMMAR`. Use `${VAR:-default}` so the environment can
+  override each one. Its header says what the grammars cover and which
+  statements are left out and why.
+- `init/vsql_<x>_init.sql` installs the extension, creates and seeds the
+  tables, and defines the procedures the grammar and check call.
+- `grammar/vsql_<x>_*.sql` has the statements pstress picks from. Keep DML
+  and DDL in separate files and weight them in `GRAMMAR`
+  (`vsql_x_dml:10 vsql_x_ddl:1`). Lines run in random order, so for random
+  values have some lines `SET @var` and others use it (as prepared
+  statement parameters, for example), or call a procedure from the init
+  file.
+- `init/vsql_<x>_check.sql` checks after every restart that the data is
+  still right, and prints `FAIL ...` when it is not.
+
+What made the existing workloads find bugs:
+
+- The check finds the bugs that do not crash. Compare the feature with a
+  path that does not use it: an index scan with the same query under
+  `IGNORE INDEX`, a value through the extension with the stored value. The
+  grammar can call the same check under load and store the results in a
+  table for CHECK_SQL to report (`p_cb_chk` and `cb_chk` in vsql_cube).
+- Keep false FAILs out. A check that fails without a bug teaches people to
+  ignore it; a query plan that changes with the isolation level or a column
+  too short for the values are typical causes.
+- Run with kill -9 and `RECOVER=1`. Rollback of transactions open at the
+  crash and redo replay are where custom storage breaks most.
+- Cover rollback: transactions that change a row several times and roll
+  back, savepoints, primary key changes, XA.
+- Leave a known bug's statements out of the grammar and name the bug in the
+  conf header, so the loop keeps finding new ones. Put them back once it is
+  fixed.
+- Set `ERR_FAIL_PATTERN` to the prefix the extension logs its errors with.
 
 ## Gotchas
 
