@@ -85,6 +85,12 @@ LIFECYCLE_BATCH=${LIFECYCLE_BATCH:-10}
 # RENDER<tab>prefix<tab>label<tab>value is a finding unless value starts with
 # prefix.
 CHECK_SQL=${CHECK_SQL:-}
+# Extended regex: error log lines matching it since the last check are a
+# finding too, reported by the check. Empty = off.
+ERR_FAIL_PATTERN=${ERR_FAIL_PATTERN:-}
+# Where VEB_FILES are copied from: an extension built outside the server tree
+# has its .veb in its own build directory.
+VEB_SRC_DIR=${VEB_SRC_DIR:-}
 # 0: after a finding, start a fresh datadir instead of restarting on the
 # crashed one (no recovery test), and run CHECK_SQL at the end of each step.
 RECOVER=${RECOVER:-1}
@@ -125,6 +131,7 @@ N_CRASH=0
 N_HANG=0
 N_RECOVERY=0
 N_CHECK=0
+ERR_SCAN_OFF=0
 
 log() { echo "$(date '+%H:%M:%S') $*" | tee -a "$LOG"; }
 die() { log "FATAL: $*"; stop_all; exit 1; }
@@ -294,7 +301,8 @@ fresh_datadir() {
   mkdir -p "$RUNDIR/life" "$RUNDIR/veb"
   local f
   for f in $VEB_FILES; do
-    cp "$BASEDIR/veb_output_directory/$f" "$RUNDIR/veb/" || die "missing $f in $BASEDIR/veb_output_directory"
+    cp "${VEB_SRC_DIR:-$BASEDIR/veb_output_directory}/$f" "$RUNDIR/veb/" \
+      || die "missing $f in ${VEB_SRC_DIR:-$BASEDIR/veb_output_directory}"
   done
   build_grammar "$GRAMMAR" "$RUNDIR/life/grammar.sql"
   [ -n "$LIFECYCLE_GRAMMAR" ] && build_grammar "$LIFECYCLE_GRAMMAR" "$RUNDIR/life/lifecycle.sql"
@@ -316,6 +324,11 @@ run_check() {
   local rc=$?
   awk -F'\t' '$1 == "RENDER" && index($4, $2) != 1 {
     print "FAIL " $3 " renders as " $4 ", expected prefix " $2 }' "$out" >> "$out.fail"
+  if [ -n "$ERR_FAIL_PATTERN" ]; then
+    tail -c +$((ERR_SCAN_OFF + 1)) "$ERR" | grep -E "$ERR_FAIL_PATTERN" | head -20 \
+      | sed 's/^/FAIL log: /' >> "$out.fail"
+    ERR_SCAN_OFF=$(err_size)
+  fi
   cat "$out.fail" >> "$out"; rm -f "$out.fail"
   local info; info=$(grep '^INFO ' "$out" | sed 's/^INFO //' | paste -sd ';' -)
   [ -n "$info" ] && log "  check: $info"
