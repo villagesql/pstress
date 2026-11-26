@@ -394,7 +394,13 @@ BEGIN
 
   SET @p_cb_samek = IF(full_cmp, @p_cb_ki <=> @p_cb_kf, NULL);
   IF @p_cb_dups > 0 OR @p_cb_ci > @p_cb_found THEN
-    SELECT GROUP_CONCAT(CONCAT(a, ':', b, '=', cv) ORDER BY seq SEPARATOR ' ') INTO @p_cb_ki
+    -- Rows returned twice go first, with their positions, so the report's
+    -- truncation cannot hide them.
+    SELECT GROUP_CONCAT(CONCAT(a, ':', b, '@', s) SEPARATOR ' ') INTO @p_cb_dk
+      FROM (SELECT a, b, GROUP_CONCAT(seq ORDER BY seq) AS s FROM vsql.cb_tmp_i
+            GROUP BY a, b HAVING COUNT(*) > 1) x;
+    SELECT CONCAT_WS(' ', CONCAT('twice ', @p_cb_dk, ' all'),
+                     GROUP_CONCAT(CONCAT(a, ':', b, '=', cv) ORDER BY seq SEPARATOR ' ')) INTO @p_cb_ki
       FROM vsql.cb_tmp_i;
     SET @p_cb_kf = NULL;
   END IF;
@@ -410,6 +416,19 @@ BEGIN
           IF(@p_cb_ki <=> @p_cb_kf, NULL, @p_cb_ki),
           IF(@p_cb_ki <=> @p_cb_kf, NULL, @p_cb_kf));
   COMMIT;
+END//
+
+-- Commits or rolls back XA transaction 'xc1' of vsql_cube_txn when it is
+-- left prepared by a killed server or a closed session; its locks would make
+-- the checks time out.
+CREATE PROCEDURE p_cb_xa_end()
+BEGIN
+  DECLARE CONTINUE HANDLER FOR 1397 BEGIN END;
+  IF RAND() < 0.5 THEN
+    XA COMMIT 'xc1';
+  ELSE
+    XA ROLLBACK 'xc1';
+  END IF;
 END//
 
 DELIMITER ;
