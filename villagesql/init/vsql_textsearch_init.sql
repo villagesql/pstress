@@ -11,9 +11,10 @@
 -- custom index over rows or rebuild the table.
 --
 -- An index keeps memtable_docs row versions in memory and then writes them
--- out as a segment. tx1, tx3, tx5 and tx6 use small values so that DML,
--- rollback, locking reads and recovery act on segment documents; tx2 and tx4
--- keep the default.
+-- out as a segment, and merges segments_per_level segments of one level into
+-- one. tx1, tx3, tx5 and tx6 use small values so that DML, rollback, locking
+-- reads and recovery act on segment documents while merges replace them;
+-- tx2 and tx4 keep the defaults. tx_opt holds the values for the checks.
 
 SET PERSIST vsql_allow_preview_extensions = ON;
 INSTALL EXTENSION vsql_textsearch;
@@ -26,7 +27,7 @@ CREATE TABLE tx1 (
   id INT PRIMARY KEY,
   body doc,
   txt VARCHAR(3000),
-  INDEX ib (body) USING EXTENDED(vsql_textsearch.bm25) WITH (analyzer = 'simple', memtable_docs = 50)
+  INDEX ib (body) USING EXTENDED(vsql_textsearch.bm25) WITH (analyzer = 'simple', memtable_docs = 50, segments_per_level = 4)
 );
 
 -- english analyzer (stopwords, stemming): membership is not checked.
@@ -38,14 +39,14 @@ CREATE TABLE tx2 (
 );
 
 -- Composite primary key with a variable-length part. Every row version is
--- written out as its own segment.
+-- written out as its own segment, and merges run all the time.
 CREATE TABLE tx3 (
   a INT NOT NULL,
   b VARCHAR(20) NOT NULL,
   body doc,
   txt VARCHAR(3000),
   PRIMARY KEY (a, b),
-  INDEX ib (body) USING EXTENDED(vsql_textsearch.bm25) WITH (analyzer = 'simple', memtable_docs = 1)
+  INDEX ib (body) USING EXTENDED(vsql_textsearch.bm25) WITH (analyzer = 'simple', memtable_docs = 1, segments_per_level = 2)
 );
 
 -- Hidden row id primary key.
@@ -60,7 +61,7 @@ CREATE TABLE tx5 (
   id INT PRIMARY KEY,
   body doc,
   txt VARCHAR(3000),
-  INDEX ib (body) USING EXTENDED(vsql_textsearch.bm25) WITH (analyzer = 'simple', k1 = '2.0', b = '0.3', memtable_docs = 7)
+  INDEX ib (body) USING EXTENDED(vsql_textsearch.bm25) WITH (analyzer = 'simple', k1 = '2.0', b = '0.3', memtable_docs = 7, segments_per_level = 3)
 );
 
 -- The vocabulary of the checked tables: no word is a substring of another,
@@ -90,14 +91,18 @@ CREATE TABLE tx_log (
   r DOUBLE
 );
 
--- An index lists its segments in one root page until segments are merged,
--- so a table with a small memtable_docs takes only so many row versions.
+CREATE TABLE tx_opt (t VARCHAR(4) PRIMARY KEY, memtable_docs INT, segments_per_level INT);
+INSERT INTO tx_opt VALUES ('tx1', 50, 4), ('tx2', 10000, 8), ('tx3', 1, 2), ('tx4', 10000, 8),
+  ('tx5', 7, 3), ('tx6', 1, 2);
+
+-- An index lists the segments left after merging in one root page, so a
+-- table with a small memtable_docs takes only so many row versions.
 -- Triggers call p_tx_budget for every row written to tx1, tx3 and tx5; it
 -- fails the statement once the table has used base + per_sec * (seconds
 -- since init) row versions. Rolled-back writes count too: an AUTO_INCREMENT
 -- value is not given back. A datadir lives about 550 seconds.
 CREATE TABLE tx_budget (t VARCHAR(4) PRIMARY KEY, base INT, per_sec INT, start DATETIME);
-INSERT INTO tx_budget VALUES ('tx1', 6000, 60, NOW()), ('tx3', 300, 1, NOW()), ('tx5', 2000, 6, NOW());
+INSERT INTO tx_budget VALUES ('tx1', 20000, 200, NOW()), ('tx3', 4000, 40, NOW()), ('tx5', 5000, 60, NOW());
 CREATE TABLE tx_seq1 (id INT AUTO_INCREMENT PRIMARY KEY);
 CREATE TABLE tx_seq3 (id INT AUTO_INCREMENT PRIMARY KEY);
 CREATE TABLE tx_seq5 (id INT AUTO_INCREMENT PRIMARY KEY);
@@ -228,6 +233,12 @@ BEGIN
   PREPARE p_tx_s FROM @s;
   EXECUTE p_tx_s USING @p_tx_lo;
   DEALLOCATE PREPARE p_tx_s;
+  -- doc takes only character strings. Old text that arrives as a binary
+  -- string is logged, to find out where that comes from, and converted.
+  IF CHARSET(@p_tx_old) = 'binary' THEN
+    INSERT INTO vsql.tx_log (src, ref) VALUES ('binary txt', @p_tx_id);
+  END IF;
+  SET @p_tx_old = CONVERT(@p_tx_old USING utf8mb4);
 END//
 
 -- Sets the text of the picked row (or, for tx4, of the row ranked first for
@@ -686,7 +697,7 @@ BEGIN
       id INT PRIMARY KEY,
       body doc,
       txt VARCHAR(3000),
-      INDEX ib (body) USING EXTENDED(vsql_textsearch.bm25) WITH (analyzer = 'simple', memtable_docs = 1)
+      INDEX ib (body) USING EXTENDED(vsql_textsearch.bm25) WITH (analyzer = 'simple', memtable_docs = 1, segments_per_level = 2)
     );
     CALL p_tx_ins('tx6', n, 100000);
     DO RELEASE_LOCK('vsql_tx_burst');
@@ -699,6 +710,32 @@ BEGIN
   IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'vsql' AND table_name = 'tx6') THEN
     CALL p_tx_words('tx6');
     CALL p_tx_chk('tx6', NULL, 10, 1, ' FOR SHARE', 1);
+  END IF;
+END//
+
+-- The loaded bm25 indexes of the vsql tables, from bm25_indexes(). An index
+-- is loaded when its table is first opened after a restart.
+CREATE VIEW tx_idx AS
+  SELECT SUBSTRING_INDEX(it.NAME, '/', -1) AS t, j.id, j.memtable_docs, j.segments_per_level,
+         j.live_versions, j.memtable, j.segments
+    FROM JSON_TABLE(bm25_indexes(), '$[*]' COLUMNS (
+           id VARCHAR(32) PATH '$.id', space INT PATH '$.space', memtable_docs INT PATH '$.memtable_docs',
+           segments_per_level INT PATH '$.segments_per_level', live_versions INT PATH '$.live_versions',
+           memtable INT PATH '$.memtable', segments JSON PATH '$.segments')) j
+    JOIN INFORMATION_SCHEMA.INNODB_TABLES it ON it.SPACE = j.space
+   WHERE it.NAME LIKE 'vsql/tx_'//
+
+-- Spills (kind 1) or merges (kind 2) the index of t now, as a write would.
+CREATE PROCEDURE p_tx_maint(t VARCHAR(4), kind INT)
+BEGIN
+  DECLARE i VARCHAR(32);
+  SELECT id INTO i FROM vsql.tx_idx WHERE tx_idx.t = t LIMIT 1;
+  IF i IS NOT NULL THEN
+    IF kind = 1 THEN
+      DO bm25_spill(i);
+    ELSE
+      DO bm25_merge(i);
+    END IF;
   END IF;
 END//
 
@@ -720,7 +757,7 @@ DELIMITER ;
 
 CALL p_tx_ins('tx1', 4000, 6000);
 CALL p_tx_ins('tx2', 2500, 3000);
-CALL p_tx_ins('tx3', 250, 3000);
+CALL p_tx_ins('tx3', 1500, 3000);
 CALL p_tx_ins('tx4', 2000, 3000);
-CALL p_tx_ins('tx5', 1500, 3000);
-CALL p_tx_burst(100);
+CALL p_tx_ins('tx5', 2500, 3000);
+CALL p_tx_burst(300);
