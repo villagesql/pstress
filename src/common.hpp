@@ -90,6 +90,9 @@ struct Option {
     NO_DELETE,
     SELECT_ALL_ROW,
     SELECT_ROW_USING_PKEY,
+    SELECT_TEMP_TABLE,
+    TEMP_TABLE_SETTINGS,
+    TEMP_TABLE_COMPARE,
     INSERT_RANDOM_ROW,
     UPDATE_ROW_USING_PKEY,
     DELETE_ALL_ROW,
@@ -156,6 +159,9 @@ struct Option {
     SELECT_VECTOR_ANN,
     SET_HNSW_EF_SEARCH,
     ADD_DROP_VECTOR_INDEX,
+    CUSTOM_TYPES,
+    CUSTOM_TYPE_PROB,
+    RECONNECT,
     MAX
   } option;
   Option(Type t, Opt o, std::string n)
@@ -203,8 +209,8 @@ struct Option {
   std::string name;
   std::string help;
   std::string default_value;
-  int default_int; // if default value is integer
-  bool default_bool; // if default value is bool
+  int default_int = 0; // if default value is integer
+  bool default_bool = false; // if default value is bool
   bool sql; // true if option is SQL, False if others
   bool ddl; // If SQL is DDL, or false if it is not
   bool cl = false;                // set if it was pass trough command line

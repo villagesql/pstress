@@ -1,0 +1,113 @@
+{
+  "types": [
+    {
+      "name": "COMPLEX",
+      "literal": "'({float},{float})'",
+      "value": "COMPLEX::from_string('({float},{float})')",
+      "where": [
+        "complex_abs({col}) > {float}",
+        "complex_real({col}) < {float}",
+        "complex_imag({col}) BETWEEN {float} AND {float}",
+        "{col} = {literal}",
+        "{col} <> {literal}",
+        "{col} IN ({literal}, {value})",
+        "complex_conjugate({col}) = {literal}"
+      ],
+      "update": [
+        "complex_add({col}, {value})",
+        "complex_subtract({col}, {literal})",
+        "complex_multiply({col}, {value})",
+        "complex_conjugate({col})"
+      ]
+    },
+    {
+      "name": "COMPLEX2",
+      "literal": "'({float},{float})'",
+      "value": "COMPLEX2::from_string('({float},{float})')",
+      "where": [
+        "{col} = {literal}",
+        "{col} <> {value}",
+        "{col} IN ({literal}, {literal})"
+      ]
+    },
+    {
+      "name": "TVECTOR",
+      "clause": "TVECTOR({dim})",
+      "dim": [
+        1,
+        16
+      ],
+      "literal": "'[{floats}]'",
+      "value": "TVECTOR::from_string('[{floats}]')",
+      "where": [
+        "tvector_dot_product({col}, {col}) > {float}",
+        "tvector_max_element({col}) < {float}",
+        "tvector_min_element({col}) > {float}",
+        "tvector_dim({col}) = {dim}",
+        "{col} = {literal}"
+      ],
+      "update": [
+        "tvector_add({col}, {value})",
+        "tvector_add({col}, {col})"
+      ]
+    },
+    {
+      "name": "BYTEARRAY",
+      "literal": "'{str}'",
+      "value": "BYTEARRAY::from_string('{str}')",
+      "where": [
+        "rot13({col}) = {literal}",
+        "even_chars({col}) <> {literal}",
+        "{col} = {literal}",
+        "ba_concat({col}, {col}) LIKE '%{str}%'"
+      ],
+      "update": [
+        "rot13({col})",
+        "even_chars({col})",
+        "odd_chars({col})"
+      ]
+    },
+    {
+      "name": "TARRAY",
+      "clause": "vsql_tarray_test.TARRAY('max_size={dim},type=float')",
+      "dim": [
+        1,
+        12
+      ],
+      "literal": "'[{floats}]'",
+      "where": [
+        "vsql_tarray_test.tarray_dim({col}) = {dim}",
+        "vsql_tarray_test.tarray_dim({col}) > {int}",
+        "{col} = {literal}"
+      ],
+      "update": [
+        "vsql_tarray_test.tarray_concat({col}, {col})"
+      ]
+    },
+    {
+      "name": "BITFIELD",
+      "clause": "vsql_bitfield_test.BITFIELD('max_number_of_bits={dim}')",
+      "dim": [
+        1,
+        64
+      ],
+      "literal": "'{bits}'",
+      "where": [
+        "vsql_bitfield_test.bitfield_length({col}) = {dim}",
+        "vsql_bitfield_test.bitfield_popcount({col}) > {int}",
+        "{col} = {literal}",
+        "{col} <> {literal}"
+      ]
+    },
+    {
+      "name": "STORED_INT",
+      "clause": "vsql_storage_test.STORED_INT",
+      "literal": "'{int}'",
+      "where": [
+        "{col} = {literal}",
+        "{col} <> {literal}",
+        "{col} IN ({literal}, {literal})"
+      ]
+    }
+  ]
+}

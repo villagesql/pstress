@@ -7,6 +7,7 @@
 #include "common.hpp"
 #include "node.hpp"
 #include <iomanip>
+#include <iterator>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -49,6 +50,9 @@ static int sum_of_all_opts = 0; // sum of all probablility
 static bool g_vector_enabled = false;
 /* the server failed the HNSW probe */
 static bool g_vector_probe_failed = false;
+/* --custom-types types that passed the probe, set by setup_custom_types() in
+ * sum_of_all_options() */
+static std::vector<Custom_Type> g_custom_types;
 std::mutex ddl_logs_write;
 static std::chrono::system_clock::time_point start_time =
     std::chrono::system_clock::now();
@@ -263,6 +267,129 @@ static void setup_vector(Thd1 *thd) {
   disable_vector(thd, "the server has no HNSW vector index support");
 }
 
+/* a string member of a --custom-types entry, empty if it is missing */
+static std::string json_string(const Value &entry, const char *key) {
+  if (entry.HasMember(key) && entry[key].IsString())
+    return entry[key].GetString();
+  return "";
+}
+
+/* an array of strings member of a --custom-types entry */
+static std::vector<std::string> json_strings(const Value &entry,
+                                             const char *key) {
+  std::vector<std::string> strs;
+  if (entry.HasMember(key) && entry[key].IsArray()) {
+    for (auto &str : entry[key].GetArray()) {
+      if (str.IsString())
+        strs.push_back(str.GetString());
+    }
+  }
+  return strs;
+}
+
+/* run the SQL of a custom type on a scratch table. The type is usable if the
+ * server takes the column and the literal or the value form. A form or an
+ * expression the server refuses is left out, and the type is indexable if
+ * CREATE INDEX on the column works */
+static bool probe_custom_type(Thd1 *thd, Custom_Type &type,
+                              const std::string &table) {
+  Custom_Column col("c", nullptr, &type, type.dim_max);
+  execute_sql("DROP TABLE IF EXISTS " + table, thd);
+  if (!execute_sql("CREATE TABLE " + table + " (id INT PRIMARY KEY, c " +
+                       col.clause() + ")",
+                   thd))
+    return false;
+
+  if (!type.literal.empty() &&
+      !execute_sql("INSERT INTO " + table + " VALUES (1, " +
+                       col.expand(type.literal) + ")",
+                   thd))
+    type.literal.clear();
+  if (!type.value.empty() &&
+      !execute_sql("INSERT INTO " + table + " VALUES (2, " +
+                       col.expand(type.value) + ")",
+                   thd))
+    type.value.clear();
+
+  if (!type.literal.empty() || !type.value.empty()) {
+    std::vector<std::string> where, update;
+    for (auto &expr : type.where) {
+      if (execute_sql("SELECT id FROM " + table + " WHERE " + col.expand(expr),
+                      thd))
+        where.push_back(expr);
+    }
+    for (auto &expr : type.update) {
+      if (execute_sql("UPDATE " + table + " SET c = " + col.expand(expr), thd))
+        update.push_back(expr);
+    }
+    type.where = where;
+    type.update = update;
+    type.indexable = execute_sql("CREATE INDEX ci ON " + table + " (c)", thd);
+  }
+  execute_sql("DROP TABLE IF EXISTS " + table, thd);
+  return !type.literal.empty() || !type.value.empty();
+}
+
+/* read the --custom-types file and keep the types that pass the probe */
+static void setup_custom_types(Thd1 *thd) {
+  g_custom_types.clear();
+  std::string file = opt_string(CUSTOM_TYPES);
+  if (file.empty())
+    return;
+
+  std::ifstream in(file);
+  if (!in)
+    throw std::runtime_error("cannot read --custom-types file " + file);
+  std::stringstream text;
+  text << in.rdbuf();
+  Document doc;
+  doc.Parse(text.str().c_str());
+  if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("types") ||
+      !doc["types"].IsArray())
+    throw std::runtime_error("--custom-types file " + file +
+                             " must be a JSON object with a \"types\" array");
+
+  std::vector<Custom_Type> types;
+  for (auto &entry : doc["types"].GetArray()) {
+    Custom_Type type;
+    type.name = json_string(entry, "name");
+    if (type.name.empty())
+      throw std::runtime_error("--custom-types entry without a name");
+    type.clause = json_string(entry, "clause");
+    if (type.clause.empty())
+      type.clause = type.name;
+    if (entry.HasMember("dim") && entry["dim"].IsArray() &&
+        entry["dim"].Size() == 2) {
+      type.dim_min = entry["dim"][0].GetInt();
+      type.dim_max = entry["dim"][1].GetInt();
+    }
+    type.literal = json_string(entry, "literal");
+    type.value = json_string(entry, "value");
+    type.where = json_strings(entry, "where");
+    type.update = json_strings(entry, "update");
+    types.push_back(type);
+  }
+
+  const std::string db = "pstress_custom_probe";
+  execute_sql("CREATE DATABASE IF NOT EXISTS " + db, thd);
+  for (size_t i = 0; i < types.size(); i++) {
+    auto &type = types[i];
+    std::string msg = "Custom type " + type.name;
+    if (probe_custom_type(thd, type, db + ".t" + std::to_string(i))) {
+      msg += " enabled: literal " + std::string(type.literal.empty() ? "no" : "yes") +
+             ", value " + (type.value.empty() ? "no" : "yes") + ", " +
+             std::to_string(type.where.size()) + " WHERE and " +
+             std::to_string(type.update.size()) + " UPDATE expressions, " +
+             (type.indexable ? "" : "not ") + "indexable";
+      g_custom_types.push_back(type);
+    } else
+      msg += " disabled: the server refused the column or both value forms";
+    std::cout << msg << std::endl;
+    thd->ddl_logs << msg << std::endl;
+  }
+  execute_sql("DROP DATABASE IF EXISTS " + db, thd);
+}
+
 /* sum the final workload weights without repeating startup setup */
 static int sum_sql_option_weights() {
   int total = 0;
@@ -281,6 +408,7 @@ int sum_of_all_options(Thd1 *thd) {
 
   /* must run before any option is disabled or summed below */
   setup_vector(thd);
+  setup_custom_types(thd);
 
   /* find out innodb page_size */
   if (options->at(Option::ENGINE)->getString().compare("INNODB") == 0) {
@@ -421,6 +549,7 @@ int sum_of_all_options(Thd1 *thd) {
   if (options->at(Option::NO_SELECT)->getBool()) {
     options->at(Option::SELECT_ALL_ROW)->setInt(0);
     options->at(Option::SELECT_ROW_USING_PKEY)->setInt(0);
+    options->at(Option::SELECT_TEMP_TABLE)->setInt(0);
     options->at(Option::SELECT_VECTOR_ANN)->setInt(0);
   }
   /* if delete is set as zero, disable all type of deletes */
@@ -709,6 +838,8 @@ Column::COLUMN_TYPES Column::col_type(std::string type) {
     return DOUBLE;
   else if (type.compare("VECTOR") == 0)
     return VECTOR;
+  else if (type.compare("CUSTOM") == 0)
+    return CUSTOM;
   else
     throw std::runtime_error("unhandled " + col_type_to_string(type_) +
                              " at line " + std::to_string(__LINE__));
@@ -737,6 +868,8 @@ const std::string Column::col_type_to_string(COLUMN_TYPES type) {
     return "GENERATED";
   case VECTOR:
     return "VECTOR";
+  case CUSTOM:
+    return "CUSTOM";
   case COLUMN_MAX:
     break;
   }
@@ -782,6 +915,7 @@ static std::string rand_value_universal(Column::COLUMN_TYPES type_,
     break;
   case Column::COLUMN_TYPES::GENERATED:
   case Column::COLUMN_TYPES::VECTOR:
+  case Column::COLUMN_TYPES::CUSTOM:
   case Column::COLUMN_TYPES::COLUMN_MAX:
     throw std::runtime_error("unhandled " + Column::col_type_to_string(type_) +
                              " at line " + std::to_string(__LINE__));
@@ -918,6 +1052,120 @@ std::string Vector_Column::rand_value() {
   return rand_vector_literal();
 }
 
+bool custom_types_enabled() { return !g_custom_types.empty(); }
+
+const Custom_Type *find_custom_type(const std::string &name) {
+  for (const auto &type : g_custom_types) {
+    if (type.name == name)
+      return &type;
+  }
+  return nullptr;
+}
+
+/* new column of a random custom type */
+Custom_Column::Custom_Column(std::string name, Table *table)
+    : Column(table, Column::CUSTOM) {
+  ctype = &g_custom_types.at(rand_int(g_custom_types.size() - 1));
+  name_ = "x" + name;
+  if (ctype->dim_max > 0)
+    dim = rand_int(ctype->dim_max, ctype->dim_min);
+}
+
+/* constructor used by load_metadata and the probe */
+Custom_Column::Custom_Column(std::string name, Table *table,
+                             const Custom_Type *type, int dim_)
+    : Column(table, Column::CUSTOM), ctype(type), dim(dim_) {
+  name_ = name;
+}
+
+/* random lower case string of 0 to 12 characters. rand_string() can't be
+ * used: its string pool does not exist yet when the probe runs */
+static std::string custom_string() {
+  std::uniform_int_distribution<int> letter('a', 'z');
+  std::string str(rand_int(12), ' ');
+  for (auto &c : str)
+    c = static_cast<char>(letter(rng));
+  return str;
+}
+
+/* random decimal in [-1000, 1000] with 0 to 3 decimals */
+static std::string custom_float() {
+  std::uniform_real_distribution<double> dis(-1000, 1000);
+  std::ostringstream out;
+  out << std::fixed << std::setprecision(rand_int(3)) << dis(rng);
+  return out.str();
+}
+
+std::string Custom_Column::expand(const std::string &tmpl) {
+  std::string out;
+  size_t i = 0;
+  while (i < tmpl.size()) {
+    auto end = tmpl[i] == '{' ? tmpl.find('}', i) : std::string::npos;
+    if (end == std::string::npos) {
+      out += tmpl[i++];
+      continue;
+    }
+    auto key = tmpl.substr(i + 1, end - i - 1);
+    if (key == "col")
+      out += name_;
+    else if (key == "dim")
+      out += std::to_string(dim);
+    else if (key == "int")
+      out += std::to_string(rand_int(1000));
+    else if (key == "float")
+      out += custom_float();
+    else if (key == "floats") {
+      for (int d = 0; d < std::max(dim, 1); d++)
+        out += (d > 0 ? "," : "") + custom_float();
+    } else if (key == "str")
+      out += custom_string();
+    else if (key == "bits") {
+      /* 1 to dim characters, each '0' or '1' */
+      auto n = rand_int(std::max(dim, 1), 1);
+      for (int b = 0; b < n; b++)
+        out += rand_int(1) ? '1' : '0';
+    } else if (key == "literal")
+      out += expand(ctype->literal);
+    else if (key == "value")
+      out += rand_value();
+    else {
+      /* not a placeholder, keep the brace */
+      out += tmpl[i++];
+      continue;
+    }
+    i = end + 1;
+  }
+  return out;
+}
+
+std::string Custom_Column::rand_value() {
+  bool literal = !ctype->literal.empty();
+  if (literal && (ctype->value.empty() || rand_int(1) == 0))
+    return expand(ctype->literal);
+  return expand(ctype->value);
+}
+
+std::string Custom_Column::update_value() {
+  if (!ctype->update.empty() && rand_int(1) == 0)
+    return expand(ctype->update.at(rand_int(ctype->update.size() - 1)));
+  return rand_value();
+}
+
+std::string Custom_Column::where_expr() {
+  if (!ctype->where.empty() && rand_int(9) != 0)
+    return expand(ctype->where.at(rand_int(ctype->where.size() - 1)));
+  return name_ + (rand_int(1) == 0 ? " IS NULL" : " IS NOT NULL");
+}
+
+/* true if a regular (btree) index can use the column */
+static bool regular_index_column(const Column *col) {
+  if (col->compressed || col->type_ == Column::VECTOR)
+    return false;
+  if (col->type_ == Column::CUSTOM)
+    return static_cast<const Custom_Column *>(col)->ctype->indexable;
+  return true;
+}
+
 /* prepare single quoted string for LIKE clause */
 std::string &Table::prepare_like_string(std::string &&str) {
   /* Check if the incoming string is empty */
@@ -1033,7 +1281,8 @@ Generated_Column::Generated_Column(std::string name, Table *table,
 
 bool Generated_Column::has_base_column(const Table *table) {
   for (auto col : *table->columns_) {
-    if (!col->auto_increment && col->type_ != GENERATED && col->type_ != VECTOR)
+    if (!col->auto_increment && col->type_ != GENERATED &&
+        col->type_ != VECTOR && col->type_ != CUSTOM)
       return true;
   }
   return false;
@@ -1071,7 +1320,8 @@ Generated_Column::Generated_Column(std::string name, Table *table)
     size_t col = rand_int(table->columns_->size() - 1);
     if (!table->columns_->at(col)->auto_increment &&
         table->columns_->at(col)->type_ != GENERATED &&
-        table->columns_->at(col)->type_ != VECTOR)
+        table->columns_->at(col)->type_ != VECTOR &&
+        table->columns_->at(col)->type_ != CUSTOM)
       col_pos.push_back(col);
   }
 
@@ -1121,6 +1371,7 @@ Generated_Column::Generated_Column(std::string name, Table *table)
       case COLUMN_MAX:
       case GENERATED:
       case VECTOR:
+      case CUSTOM:
         throw std::runtime_error("unhandled " + col_type_to_string(col->type_) +
                                  " at line " + std::to_string(__LINE__));
       }
@@ -1173,6 +1424,15 @@ template <typename Writer> void Column::Serialize(Writer &writer) const {
 
 /* add dimension in metadata */
 template <typename Writer> void Vector_Column::Serialize(Writer &writer) const {
+  writer.String("dim");
+  writer.Int(dim);
+}
+
+/* add the custom type and dimension in metadata */
+template <typename Writer> void Custom_Column::Serialize(Writer &writer) const {
+  writer.String("custom_type");
+  writer.String(ctype->name.c_str(),
+                static_cast<SizeType>(ctype->name.length()));
   writer.String("dim");
   writer.Int(dim);
 }
@@ -1329,6 +1589,8 @@ template <typename Writer> void Table::Serialize(Writer &writer) const {
       static_cast<Blob_Column *>(col)->Serialize(writer);
     } else if (col->type_ == Column::VECTOR) {
       static_cast<Vector_Column *>(col)->Serialize(writer);
+    } else if (col->type_ == Column::CUSTOM) {
+      static_cast<Custom_Column *>(col)->Serialize(writer);
     }
     writer.EndObject();
   }
@@ -1918,6 +2180,9 @@ void Table::CreateRandomColumns(bool pk_allowed, bool has_auto_increment) {
         if (!no_virtual_col && i >= .8 * max_columns && rand_int(1) == 1 &&
             Generated_Column::has_base_column(this))
           col_type = Column::GENERATED;
+        else if (custom_types_enabled() &&
+                 rand_int(99) < options->at(Option::CUSTOM_TYPE_PROB)->getInt())
+          col_type = Column::CUSTOM;
         else if (prob < 5)
           col_type = Column::INT;
         else if (prob < 6)
@@ -1940,6 +2205,8 @@ void Table::CreateRandomColumns(bool pk_allowed, bool has_auto_increment) {
         col = new Generated_Column(name, this);
       else if (col_type == Column::BLOB)
         col = new Blob_Column(name, this);
+      else if (col_type == Column::CUSTOM)
+        col = new Custom_Column(name, this);
       else
         col = new Column(name, this, col_type);
 
@@ -1983,11 +2250,11 @@ void Table::CreateDefaultIndex() {
 
     static size_t max_columns = opt_int(INDEX_COLUMNS);
 
-    /* compressed and vector columns can't be in a regular index */
+    /* compressed, vector and some custom columns can't be in a regular index */
     int number_of_compressed = 0;
 
     for (auto column : *columns_)
-      if (column->compressed || column->type_ == Column::VECTOR)
+      if (!regular_index_column(column))
         number_of_compressed++;
 
     size_t number_of_columns = columns_->size() - number_of_compressed;
@@ -2004,8 +2271,7 @@ void Table::CreateDefaultIndex() {
     /* pick some columns */
     while (col_pos.size() < number_of_columns) {
       int current = rand_int(columns_->size() - 1);
-      if (columns_->at(current)->compressed ||
-          columns_->at(current)->type_ == Column::VECTOR)
+      if (!regular_index_column(columns_->at(current)))
         continue;
       /* auto-inc column should be first column in auto_inc_index */
       if (auto_inc_pos != -1 && i == auto_inc_index && col_pos.size() == 0)
@@ -2854,6 +3120,7 @@ void Table::ModifyColumn(Thd1 *thd) {
       break;
       /* todo no support for BOOL INT so far */
     case Column::BOOL:
+    case Column::CUSTOM:
     case Column::COLUMN_MAX:
       break;
     }
@@ -2986,7 +3253,9 @@ void Table::AddColumn(Thd1 *thd) {
     /* new columns are in ratio of 3:2:1:1:1:1
      * INT:VARCHAR:CHAR:BLOB:BOOL:GENERATD */
     auto prob = rand_int(8);
-    if (prob < 1)
+    if (custom_types_enabled() && rand_int(99) < options->at(Option::CUSTOM_TYPE_PROB)->getInt())
+      col_type = Column::CUSTOM;
+    else if (prob < 1)
       col_type = Column::INTEGER;
     else if (prob < 3)
       col_type = Column::INT;
@@ -3010,6 +3279,8 @@ void Table::AddColumn(Thd1 *thd) {
     tc = new Generated_Column(name, this);
   else if (col_type == Column::BLOB)
     tc = new Blob_Column(name, this);
+  else if (col_type == Column::CUSTOM)
+    tc = new Custom_Column(name, this);
   else
     tc = new Column(name, this, col_type);
 
@@ -3101,10 +3372,11 @@ void Table::AddIndex(Thd1 *thd) {
   static size_t max_columns = opt_int(INDEX_COLUMNS);
   std::unique_lock<std::mutex> metadata_lock(table_mutex);
 
-  /* vector columns can't be in a regular index */
+  /* vector and some custom columns can't be in a regular index */
   size_t index_columns = 0;
   for (auto col : *columns_)
-    if (col->type_ != Column::VECTOR)
+    if (col->type_ != Column::VECTOR &&
+        (col->type_ != Column::CUSTOM || regular_index_column(col)))
       index_columns++;
 
   if (index_columns == 0)
@@ -3119,7 +3391,9 @@ void Table::AddIndex(Thd1 *thd) {
   /* pick some columns */
   while (col_pos.size() < (size_t)no_of_columns) {
     int current = rand_int(columns_->size() - 1);
-    if (columns_->at(current)->type_ == Column::VECTOR)
+    auto col = columns_->at(current);
+    if (col->type_ == Column::VECTOR ||
+        (col->type_ == Column::CUSTOM && !regular_index_column(col)))
       continue;
     /* auto-inc column should be first column in auto_inc_index */
     bool already_added = false;
@@ -3193,6 +3467,222 @@ void Table::DeleteAllRows(Thd1 *thd) {
     sql += ")";
   }
   execute_sql(sql, thd);
+}
+
+/* true if select_temp_table queries can group, sort, deduplicate and join on
+ * the column */
+static bool temp_table_column(const Column *col) {
+  auto type = col->type_;
+  if (type == Column::GENERATED)
+    type = static_cast<const Generated_Column *>(col)->g_type;
+  return type == Column::INT || type == Column::INTEGER ||
+         type == Column::FLOAT || type == Column::DOUBLE ||
+         type == Column::CHAR || type == Column::VARCHAR ||
+         type == Column::BOOL || type == Column::BLOB;
+}
+
+/* SET SESSION of one setting that changes where an internal temporary table
+ * is kept, when it spills to disk, or how the optimizer materializes and
+ * joins. Small sizes are near the minimum the server allows */
+static std::string temp_table_setting(bool same_result = false) {
+  auto pick = [](const std::vector<std::string> &values) {
+    return values.at(rand_int(values.size() - 1));
+  };
+  std::string var;
+  std::string value;
+  /* max_sort_length can change how long values group and sort */
+  auto choice = rand_int(same_result ? 6 : 7);
+  if (same_result && choice == 6)
+    choice = 7;
+  switch (choice) {
+  case 0:
+    var = "internal_tmp_mem_storage_engine";
+    value = pick({"TempTable", "MEMORY"});
+    break;
+  case 1:
+    var = "tmp_table_size";
+    value = pick({"1024", "16384", "1048576", "DEFAULT"});
+    break;
+  case 2:
+    var = "max_heap_table_size";
+    value = pick({"16384", "1048576", "DEFAULT"});
+    break;
+  case 3:
+    var = "big_tables";
+    value = pick({"ON", "OFF"});
+    break;
+  case 4:
+    var = "sort_buffer_size";
+    value = pick({"32768", "65536", "DEFAULT"});
+    break;
+  case 5:
+    var = "join_buffer_size";
+    value = pick({"128", "8192", "DEFAULT"});
+    break;
+  case 6:
+    var = "max_sort_length";
+    value = pick({"4", "64", "DEFAULT"});
+    break;
+  default:
+    var = "optimizer_switch";
+    value = "'" +
+            pick({"block_nested_loop", "materialization", "semijoin",
+                  "subquery_materialization_cost_based", "derived_merge",
+                  "duplicateweedout", "firstmatch", "loosescan"}) +
+            (rand_int(1) == 0 ? "=on'" : "=off'");
+  }
+  return "SET SESSION " + var + " = " + value;
+}
+
+/* the rows of the last result of thd, as sorted strings, false if there is
+ * no result */
+static bool result_rows(Thd1 *thd, std::vector<std::string> &rows) {
+  rows.clear();
+  if (!thd->result)
+    return false;
+  auto res = thd->result.get();
+  mysql_data_seek(res, 0);
+  auto fields = mysql_num_fields(res);
+  while (auto row = mysql_fetch_row(res)) {
+    auto lengths = mysql_fetch_lengths(res);
+    std::string str;
+    for (unsigned int i = 0; i < fields; i++) {
+      str += i > 0 ? "|" : "";
+      str += row[i] == nullptr ? "NULL" : "'" + std::string(row[i], lengths[i]) + "'";
+    }
+    rows.push_back(str);
+  }
+  std::sort(rows.begin(), rows.end());
+  return true;
+}
+
+/* run sql twice in one consistent snapshot, with one temporary table setting
+ * changed in between, and report different rows */
+static void compare_temp_table_query(const std::string &sql, Thd1 *thd) {
+  std::vector<std::string> first, second;
+  execute_sql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", thd);
+  if (!execute_sql("START TRANSACTION WITH CONSISTENT SNAPSHOT", thd))
+    return;
+  auto setting = temp_table_setting(true);
+  bool compared = execute_sql(sql, thd) && result_rows(thd, first) &&
+                  execute_sql(setting, thd) && execute_sql(sql, thd) &&
+                  result_rows(thd, second);
+  execute_sql("COMMIT", thd);
+  if (!compared || first == second)
+    return;
+
+  std::ostringstream msg;
+  msg << "RESULT MISMATCH thread " << thd->thread_id << ": " << sql
+      << " returned " << first.size() << " rows, then " << second.size()
+      << " rows after " << setting;
+  std::cout << msg.str() << std::endl;
+  thd->thread_log << msg.str() << std::endl;
+  std::vector<std::string> only_first, only_second;
+  std::set_difference(first.begin(), first.end(), second.begin(), second.end(),
+                      std::back_inserter(only_first));
+  std::set_difference(second.begin(), second.end(), first.begin(), first.end(),
+                      std::back_inserter(only_second));
+  for (size_t i = 0; i < only_first.size() && i < 10; i++)
+    thd->thread_log << "  first only: " << only_first[i] << std::endl;
+  for (size_t i = 0; i < only_second.size() && i < 10; i++)
+    thd->thread_log << "  second only: " << only_second[i] << std::endl;
+}
+
+void Table::SelectTempTable(Thd1 *thd) {
+  table_mutex.lock();
+  std::vector<std::string> cols;
+  for (auto col : *columns_) {
+    if (temp_table_column(col))
+      cols.push_back(col->name_);
+  }
+  std::string index_names;
+  for (auto index : *indexes_)
+    index_names += (index_names.empty() ? "" : ", ") + index->name_;
+  table_mutex.unlock();
+  if (cols.empty())
+    return;
+
+  auto c = cols.at(rand_int(cols.size() - 1));
+  auto c2 = cols.at(rand_int(cols.size() - 1));
+  auto t = name_;
+
+  /* only InnoDB reads from a consistent snapshot */
+  static auto compare_prob = options->at(Option::TEMP_TABLE_COMPARE)->getInt();
+  std::string table_engine = engine.empty() ? opt_string(ENGINE) : engine;
+  std::transform(table_engine.begin(), table_engine.end(),
+                 table_engine.begin(), ::toupper);
+  bool compare = table_engine == "INNODB" && rand_int(99) < compare_prob;
+
+  /* a compared query reads every row: a LIMIT without a total order can
+   * return different rows each time. The LIMIT still keeps the derived
+   * table from being merged */
+  auto limit = " LIMIT " + (compare ? std::string("18446744073709551615")
+                                    : std::to_string(rand_int(100, 1)));
+  /* a compared query reads the table through the primary key or a table
+   * scan: a consistent read through a secondary index can return a row twice
+   * or miss one while other sessions update it (MySQL bug #121855) */
+  std::string hint =
+      compare && !index_names.empty() ? " IGNORE INDEX (" + index_names + ")"
+                                      : "";
+  /* the table in a FROM clause, with an optional alias */
+  auto from = [&](const std::string &alias) {
+    return t + (alias.empty() ? "" : " " + alias) + hint;
+  };
+  /* a statement can open a temporary table only once, so the shapes that
+   * read the table twice come last */
+  int shapes = type == TEMPORARY ? 5 : 9;
+  std::string sql;
+  switch (rand_int(shapes)) {
+  case 0:
+    sql = "SELECT " + c + ", COUNT(*) FROM " + from("") + " GROUP BY " + c;
+    if (rand_int(1) == 0)
+      sql += " ORDER BY " + c;
+    break;
+  case 1:
+    sql = "SELECT DISTINCT " + c + ", " + c2 + " FROM " + from("") + limit;
+    break;
+  case 2:
+    sql = "SELECT COUNT(DISTINCT " + c + ") FROM " + from("");
+    break;
+  case 3:
+    sql = "SELECT * FROM " + from("") + " ORDER BY " + c +
+          (rand_int(1) == 0 ? " DESC" : "") + limit;
+    break;
+  case 4:
+    /* LIMIT keeps the derived table from being merged */
+    sql = "SELECT d." + c + ", COUNT(*) FROM (SELECT " + c + " FROM " + from("") +
+          " ORDER BY " + c + limit + ") AS d GROUP BY d." + c;
+    break;
+  case 5:
+    /* RANK(), unlike ROW_NUMBER(), numbers ties the same every time */
+    sql = "SELECT " + c + ", RANK() OVER (PARTITION BY " + c +
+          " ORDER BY " + c2 + ") FROM " + from("") + limit;
+    break;
+  case 6:
+    sql = "SELECT " + c + " FROM " + from("") + " WHERE " + c2 + " IS NOT NULL" +
+          (rand_int(1) == 0 ? " UNION " : " UNION ALL ") + "SELECT " + c +
+          " FROM " + from("") + limit;
+    break;
+  case 7:
+    /* a CTE read twice is materialized */
+    sql = "WITH cte AS (SELECT " + c + " FROM " + from("") + limit +
+          ") SELECT a." + c + " FROM cte a JOIN cte b ON a." + c + " = b." + c;
+    break;
+  case 8:
+    sql = "SELECT * FROM " + from("a") + " WHERE a." + c + " IN (SELECT b." + c +
+          " FROM " + from("b") + ")" + limit;
+    break;
+  default:
+    sql = "SELECT COUNT(*) FROM " + from("a") + " JOIN " + from("b") + " ON a." + c +
+          " = b." + c;
+  }
+  static auto settings_prob = options->at(Option::TEMP_TABLE_SETTINGS)->getInt();
+  if (rand_int(99) < settings_prob)
+    execute_sql(temp_table_setting(), thd);
+  if (compare)
+    compare_temp_table_query(sql, thd);
+  else
+    execute_sql(sql, thd);
 }
 
 void Table::SelectAllRow(Thd1 *thd) {
@@ -3333,6 +3823,10 @@ void Table::DeleteRandomRow(Thd1 *thd) {
         if (rand_int(1000) < 10)
           where = col_pos;
         break;
+      case Column::CUSTOM:
+        if (rand_int(1) == 0)
+          where = col_pos;
+        break;
       /* a vector column is never a WHERE column */
       case Column::VECTOR:
       case Column::COLUMN_MAX:
@@ -3357,23 +3851,27 @@ void Table::DeleteRandomRow(Thd1 *thd) {
 
     sql += ")";
   }
-  sql += " WHERE " + columns_->at(where)->name_;
-
   auto prob = rand_int(100);
-  if (prob <= 90)
-    sql += " = " + columns_->at(where)->rand_value();
-  else if (prob <= 92)
-    sql += " >= " + columns_->at(where)->rand_value() + " AND " +
-           columns_->at(where)->name_ +
-           " <= " + columns_->at(where)->rand_value();
-  else if (prob <= 96)
-    sql += " IN (" + columns_->at(where)->rand_value() + "," +
-           columns_->at(where)->rand_value() + ")";
-  else if (prob <= 99)
-    sql += " BETWEEN " + columns_->at(where)->rand_value() + " AND " +
-           columns_->at(where)->rand_value();
-  else
-    sql += " LIKE " + prepare_like_string(columns_->at(where)->rand_value());
+  if (columns_->at(where)->type_ == Column::CUSTOM)
+    sql += " WHERE " +
+           static_cast<Custom_Column *>(columns_->at(where))->where_expr();
+  else {
+    sql += " WHERE " + columns_->at(where)->name_;
+    if (prob <= 90)
+      sql += " = " + columns_->at(where)->rand_value();
+    else if (prob <= 92)
+      sql += " >= " + columns_->at(where)->rand_value() + " AND " +
+             columns_->at(where)->name_ +
+             " <= " + columns_->at(where)->rand_value();
+    else if (prob <= 96)
+      sql += " IN (" + columns_->at(where)->rand_value() + "," +
+             columns_->at(where)->rand_value() + ")";
+    else if (prob <= 99)
+      sql += " BETWEEN " + columns_->at(where)->rand_value() + " AND " +
+             columns_->at(where)->rand_value();
+    else
+      sql += " LIKE " + prepare_like_string(columns_->at(where)->rand_value());
+  }
 
   table_mutex.unlock();
   execute_sql(sql, thd);
@@ -3402,6 +3900,10 @@ void Table::SelectRandomRow(Thd1 *thd) {
       if (rand_int(1000) < 10)
         where = col_pos;
       break;
+    case Column::CUSTOM:
+      if (rand_int(1) == 0)
+        where = col_pos;
+      break;
     /* a vector column is never a WHERE column */
     case Column::VECTOR:
     case Column::COLUMN_MAX:
@@ -3427,8 +3929,15 @@ void Table::SelectRandomRow(Thd1 *thd) {
     sql += ")";
   }
 
-  sql += " WHERE " + columns_->at(where)->name_;
   auto prob = rand_int(100);
+  if (columns_->at(where)->type_ == Column::CUSTOM) {
+    sql += " WHERE " +
+           static_cast<Custom_Column *>(columns_->at(where))->where_expr();
+    table_mutex.unlock();
+    execute_sql(sql, thd);
+    return;
+  }
+  sql += " WHERE " + columns_->at(where)->name_;
   if (rand_int(1000) < 2)
     sql += " NOT BETWEEN " + columns_->at(where)->rand_value() + " AND " +
            columns_->at(where)->rand_value();
@@ -3489,6 +3998,10 @@ void Table::UpdateRandomROW(Thd1 *thd) {
       if (rand_int(1000) < 10)
         where = col_pos;
       break;
+    case Column::CUSTOM:
+      if (rand_int(1) == 0)
+        where = col_pos;
+      break;
     /* a vector column is never a WHERE column */
     case Column::VECTOR:
     case Column::COLUMN_MAX:
@@ -3514,8 +4027,12 @@ void Table::UpdateRandomROW(Thd1 *thd) {
     sql += ")";
   }
 
-  sql += " SET " + columns_->at(set)->name_ + " = " +
-         columns_->at(set)->rand_value() + " WHERE ";
+  auto set_col = columns_->at(set);
+  sql += " SET " + set_col->name_ + " = " +
+         (set_col->type_ == Column::CUSTOM
+              ? static_cast<Custom_Column *>(set_col)->update_value()
+              : set_col->rand_value()) +
+         " WHERE ";
 
   /* if tables has pkey try to use that in where clause for 50% cases */
   for (size_t i = 0; i < columns_->size(); i++) {
@@ -3525,7 +4042,9 @@ void Table::UpdateRandomROW(Thd1 *thd) {
     }
   }
   auto prob = rand_int(100);
-  if (prob <= 90)
+  if (columns_->at(where)->type_ == Column::CUSTOM)
+    sql += static_cast<Custom_Column *>(columns_->at(where))->where_expr();
+  else if (prob <= 90)
     sql +=
         columns_->at(where)->name_ + " = " + columns_->at(where)->rand_value();
   else if (prob <= 92)
@@ -4148,6 +4667,15 @@ static std::string load_metadata_from_file() {
       } else if (type.compare("VECTOR") == 0) {
         a = new Vector_Column(col["name"].GetString(), table,
                               col["dim"].GetInt());
+      } else if (type.compare("CUSTOM") == 0) {
+        std::string type_name = col["custom_type"].GetString();
+        auto ctype = find_custom_type(type_name);
+        if (ctype == nullptr)
+          throw std::runtime_error("metadata has a column of custom type " +
+                                   type_name +
+                                   ", which --custom-types does not provide");
+        a = new Custom_Column(col["name"].GetString(), table, ctype,
+                              col["dim"].GetInt());
       } else
         throw std::runtime_error("unhandled column type");
 
@@ -4462,7 +4990,8 @@ static std::string ann_condition(Vector_table *table, const std::string &alias,
   /* another column, never the vector column */
   std::vector<Column *> others;
   for (auto col : *table->columns_) {
-    if (col->type_ != Column::VECTOR && !col->primary_key)
+    if (col->type_ != Column::VECTOR && col->type_ != Column::CUSTOM &&
+        !col->primary_key)
       others.push_back(col);
   }
   if (others.empty())
@@ -4733,6 +5262,82 @@ void set_hnsw_ef_search(Thd1 *thd) {
 }
 
 /* return true if successful or error out in case of fail */
+bool Thd1::churn_connection(std::vector<Table *> *session_tables) {
+  static auto log_all = opt_bool(LOG_ALL_QUERIES);
+  static auto log_failed = opt_bool(LOG_FAILED_QUERIES);
+  std::string user = opt_string(USER);
+  std::string password = opt_string(PASSWORD);
+  std::string database = opt_string(DATABASE);
+  std::string what;
+  std::string error;
+  bool ok = false;
+
+  switch (rand_int(2)) {
+  case 0: {
+    what = "reconnect";
+    /* connect first, so a failure leaves the old connection in place */
+    MYSQL *fresh = mysql_init(nullptr);
+    if (fresh == nullptr) {
+      error = "mysql_init() failed";
+      break;
+    }
+    ok = mysql_real_connect(fresh, opt_string(ADDRESS).c_str(), user.c_str(),
+                            password.c_str(), database.c_str(),
+                            options->at(Option::PORT)->getInt(),
+                            opt_string(SOCKET).c_str(), 0) != nullptr;
+    if (ok) {
+      mysql_close(conn);
+      conn = fresh;
+    } else {
+      error = mysql_error(fresh);
+      mysql_close(fresh);
+    }
+    break;
+  }
+  case 1:
+    what = "reset connection";
+    ok = mysql_reset_connection(conn) == 0;
+    if (!ok)
+      error = mysql_error(conn);
+    break;
+  default:
+    what = "change user";
+    ok = !mysql_change_user(conn, user.c_str(), password.c_str(),
+                            database.c_str());
+    if (!ok)
+      error = mysql_error(conn);
+  }
+
+  performed_queries_total++;
+  action_executed_sql = true;
+  if (ok) {
+    max_con_fail_count = 0;
+    if (log_all)
+      thread_log << " S /* " << what << " */" << std::endl;
+  } else {
+    failed_queries_total++;
+    max_con_fail_count++;
+    if (log_all || log_failed)
+      thread_log << " F /* " << what << " */" << std::endl
+                 << "Error " << error << std::endl;
+    if (mysql_errno(conn) == CR_SERVER_GONE_ERROR ||
+        mysql_errno(conn) == CR_SERVER_LOST) {
+      thread_log << "server gone, while processing " << what << std::endl;
+      run_query_failed = true;
+    }
+    success = false;
+    return false;
+  }
+
+  /* the server dropped the session's temporary tables */
+  for (auto table : *session_tables) {
+    if (table->type == Table::TEMPORARY)
+      execute_sql(table->definition(), this);
+  }
+  success = true;
+  return true;
+}
+
 bool Thd1::run_some_query() {
   /* VECTOR after FK: the FK table takes the keys of its parent from
    * thd->unique_keys, which every bulk load overwrites */
@@ -4968,6 +5573,9 @@ bool Thd1::run_some_query() {
     case Option::SELECT_ROW_USING_PKEY:
       table->SelectRandomRow(this);
       break;
+    case Option::SELECT_TEMP_TABLE:
+      table->SelectTempTable(this);
+      break;
     case Option::INSERT_RANDOM_ROW:
       table->InsertRandomRow(this);
       break;
@@ -5034,6 +5642,12 @@ bool Thd1::run_some_query() {
       break;
     case Option::SET_HNSW_EF_SEARCH:
       set_hnsw_ef_search(this);
+      break;
+    case Option::RECONNECT:
+      churn_connection(all_session_tables);
+      /* the server ended any open transaction */
+      trx_left = 0;
+      current_save_point = 0;
       break;
 
     default:

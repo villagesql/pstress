@@ -311,6 +311,31 @@ void add_options() {
   opt->setSQL();
   opt->setDDL();
 
+  /* Custom column types */
+  opt = newOption(Option::STRING, Option::CUSTOM_TYPES, "custom-types");
+  opt->help = R"(
+    JSON file describing column types the server gets from plugins or
+    extensions: the column clause, literal and value templates, and WHERE and
+    UPDATE expressions. Each type is probed at startup, and a type, expression
+    or index the server refuses is left out.
+  )";
+  opt->setString("");
+
+  /* Probability of custom columns */
+  opt = newOption(Option::INT, Option::CUSTOM_TYPE_PROB, "custom-type-prob");
+  opt->help = "Percentage of new random columns that use a --custom-types type";
+  opt->setInt(15);
+
+  /* Connection churn */
+  opt = newOption(Option::INT, Option::RECONNECT, "reconnect");
+  opt->help = R"(
+    Close and reopen the connection, reset it (COM_RESET_CONNECTION) or change
+    user (COM_CHANGE_USER). Ends any open transaction; the session's temporary
+    tables are created again, empty.
+  )";
+  opt->setInt(0);
+  opt->setSQL();
+
   /* Initial Records in table */
   opt = newOption(Option::INT, Option::INITIAL_RECORDS_IN_TABLE, "records");
   opt->help =
@@ -511,6 +536,38 @@ void add_options() {
   opt->help = "Select table using single row";
   opt->setInt(800);
   opt->setSQL();
+
+  opt = newOption(Option::INT, Option::SELECT_TEMP_TABLE, "select-temp-table");
+  opt->help = R"(
+    SELECT that makes the server build an internal temporary table or sort:
+    GROUP BY, DISTINCT, ORDER BY, UNION, a materialized derived table or CTE,
+    an IN subquery, a self join or a window function on a random column.
+  )";
+  opt->setInt(20);
+  opt->setSQL();
+
+  opt = newOption(Option::INT, Option::TEMP_TABLE_SETTINGS,
+                  "temp-table-settings");
+  opt->help = R"(
+    Percentage of --select-temp-table queries preceded by a SET SESSION that
+    changes where the temporary table is kept or when it spills to disk:
+    internal_tmp_mem_storage_engine, tmp_table_size, max_heap_table_size,
+    big_tables, sort_buffer_size, join_buffer_size, max_sort_length or an
+    optimizer_switch flag.
+  )";
+  opt->setInt(25);
+
+  opt = newOption(Option::INT, Option::TEMP_TABLE_COMPARE,
+                  "temp-table-compare");
+  opt->help = R"(
+    Percentage of --select-temp-table queries on InnoDB tables that run twice
+    in one consistent snapshot, with a setting from --temp-table-settings
+    changed in between. Different rows are reported as a RESULT MISMATCH on
+    stdout and in the thread log. The compared queries ignore secondary
+    indexes: a consistent read through one can return a row twice or miss one
+    while other sessions update the table (MySQL bug #121855).
+  )";
+  opt->setInt(10);
 
   /* Insert random row */
   opt = newOption(Option::INT, Option::INSERT_RANDOM_ROW, "insert-row");
