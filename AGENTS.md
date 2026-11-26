@@ -79,6 +79,7 @@ sleep: `caffeinate -dimsu villagesql/vsql-loop.sh ...`.
 | `vsql_cidx` | custom indexes from the test extensions | knn_index_test, index_test, ext_index_test |
 | `vsql_vector` | vsql_vector SVECTOR and HNSW: DML, KNN, transactions | vsql_vector |
 | `vsql_cube` | vsql_cube R-tree: exact KNN checks, rollbacks, locking reads | vsql_cube built with `-DVSQL_CUBE_RTREE=ON`; set `VEB_SRC_DIR` to its build directory |
+| `vsql_textsearch` | vsql_textsearch bm25: ranked reads checked against a REGEXP on a copy of the text, rollbacks, locking reads | vsql_textsearch built with `-DVTS_BUILD_EXTENSION=ON` |
 
 Each conf file's header says what its grammars cover, which statements are
 left out and why (known bugs), and how to add them back.
