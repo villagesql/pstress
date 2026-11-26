@@ -8,6 +8,8 @@
 -- and the same for the locking reads of p_cb_lchk.
 -- The R-tree is exact, so any difference from the full scan fails.
 
+CALL vsql.p_cb_xa_end();
+
 CALL vsql.p_cb_chk('cb1', 10, 0);
 CALL vsql.p_cb_chk('cb1', 300, 1);
 CALL vsql.p_cb_chk('cb1', 0, 0);
