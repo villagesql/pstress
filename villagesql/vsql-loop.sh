@@ -46,6 +46,9 @@
 #   vsql_vector_alter       ALTER TABLE, CREATE INDEX, OPTIMIZE, CHECK on HNSW
 #                           tables (crash today; opt in)
 # conf/vsql_vector.conf switches the init SQL, .veb and grammar to vsql_vector.
+# The other workloads (vsql_types, vsql_lifecycle, vsql_sessvar, vsql_caps,
+# vsql_cidx, vsql_cube) describe their grammars in their conf files.
+# AGENTS.md has an overview of every workload, the build and the results.
 #
 # Usage:  BASEDIR=<build dir> villagesql/vsql-loop.sh [config-file]
 # Any variable below can be set in the environment or in the config file.
