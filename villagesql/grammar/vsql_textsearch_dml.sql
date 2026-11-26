@@ -101,3 +101,19 @@ CALL vsql.p_tx_chk('tx2', NULL, 10, 0, ' FOR SHARE', 0)
 CALL vsql.p_tx_chk('tx3', NULL, 10, 0, ' FOR UPDATE', 0)
 CALL vsql.p_tx_chk('tx3', NULL, 300, 1, ' FOR SHARE', 0)
 CALL vsql.p_tx_chk('tx5', NULL, 10, 0, ' FOR SHARE', 0)
+CALL vsql.p_tx_ins('tx3', 20, 3000)
+CALL vsql.p_tx_burst(300)
+CALL vsql.p_tx_burst(300)
+CALL vsql.p_tx_burst(600)
+CALL vsql.p_tx_ins('tx6', 20, 100000)
+CALL vsql.p_tx_ins('tx6', 20, 100000)
+SELECT id FROM vsql.tx6 ORDER BY bm25_distance(body, 'apple') LIMIT 10
+SELECT id, body FROM vsql.tx6 ORDER BY bm25_distance(body, 'river stone') LIMIT 300 FOR SHARE
+DELETE FROM vsql.tx6 ORDER BY bm25_distance(body, 'cloud') LIMIT 5
+UPDATE vsql.tx6 SET body = 'quick', txt = 'quick' ORDER BY bm25_distance(body, 'green') LIMIT 5
+CALL vsql.p_tx_chk('tx6', NULL, 0, 0, '', 0)
+CALL vsql.p_tx_chk('tx6', NULL, 10, 0, ' FOR UPDATE', 0)
+CALL vsql.p_tx_snap('tx1', 10)
+CALL vsql.p_tx_snap('tx3', 10)
+CALL vsql.p_tx_snap('tx5', 5)
+CALL vsql.p_tx_snap('tx6', 5)

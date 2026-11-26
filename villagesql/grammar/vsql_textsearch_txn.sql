@@ -54,3 +54,6 @@ SELECT id FROM vsql.tx1 ORDER BY bm25_distance(body, 'thistle') LIMIT 10
 SELECT a, b FROM vsql.tx3 ORDER BY bm25_distance(body, 'apple') LIMIT 10
 SELECT body FROM vsql.tx4 ORDER BY bm25_distance(body, 'apple') LIMIT 10
 DELETE FROM vsql.tx_log ORDER BY id LIMIT 1000
+CALL vsql.p_tx_txn('tx6', 2, 1)
+CALL vsql.p_tx_txn('tx6', 4, 0)
+CALL vsql.p_tx_txn('tx6', 5, 1)
