@@ -89,8 +89,5 @@ SELECT CONCAT('INFO p_tx_chk: ', SUM(src = 'chk'), ' reads, ', SUM(src = 'lchk')
               IFNULL(SUM(dups > 0 OR NOT ordered OR extra > 0 OR missing <> 0 OR bad_text > 0), 0), ' mismatches')
   FROM vsql.tx_chk WHERE seen = 0;
 
-SELECT CONCAT('INFO p_tx_pick read txt as a binary string ', COUNT(*), ' times')
-  FROM vsql.tx_log WHERE src = 'binary txt' HAVING COUNT(*) > 0;
-
 UPDATE vsql.tx_chk SET seen = 1 WHERE seen = 0;
 DELETE FROM vsql.tx_chk WHERE seen = 1 AND id < (SELECT m FROM (SELECT MAX(id) - 100000 AS m FROM vsql.tx_chk) x);

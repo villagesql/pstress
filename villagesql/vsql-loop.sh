@@ -10,8 +10,8 @@
 #                  answering, or pstress ran HANG_GRACE seconds past its time
 #   shutdown_hang  SIGNAL=15 shutdown took longer than SHUTDOWN_TIMEOUT
 #   recovery_*     restart after a kill/crash died or did not come up
-#   check_failed   CHECK_SQL, run after every restart, printed a FAIL line or
-#                  an error
+#   check_failed   CHECK_SQL, run after every restart, printed a FAIL line,
+#                  an error, or did not finish in CHECK_TIMEOUT seconds
 # Hangs get stack dumps (macOS: sample + lldb, Linux: gdb) and server state
 # before the server is killed with SIGABRT.
 #
@@ -109,6 +109,7 @@ INNODB_LOCK_WAIT_TIMEOUT=${INNODB_LOCK_WAIT_TIMEOUT:-5}
 STALL_SECS=${STALL_SECS:-300}
 HANG_GRACE=${HANG_GRACE:-120}
 START_TIMEOUT=${START_TIMEOUT:-180}
+CHECK_TIMEOUT=${CHECK_TIMEOUT:-300}
 SHUTDOWN_TIMEOUT=${SHUTDOWN_TIMEOUT:-120}
 SAVE_DATADIR=${SAVE_DATADIR:-1}
 PORT=${PORT:-$((30000 + RANDOM % 5000))}
@@ -323,8 +324,9 @@ fresh_datadir() {
 run_check() {
   [ -n "$CHECK_SQL" ] || return 0
   local out="$RUNDIR/life/check_step_$STEP.out"
-  run_timeout 60 "$MYSQL" -uroot -S "$SOCK" -N --force -e "source $CHECK_SQL" > "$out" 2>&1
+  run_timeout "$CHECK_TIMEOUT" "$MYSQL" -uroot -S "$SOCK" -N --force -e "source $CHECK_SQL" > "$out" 2>&1
   local rc=$?
+  [ $rc -eq 124 ] && echo "FAIL CHECK_SQL did not finish in $CHECK_TIMEOUT s" >> "$out.fail"
   awk -F'\t' '$1 == "RENDER" && index($4, $2) != 1 {
     print "FAIL " $3 " renders as " $4 ", expected prefix " $2 }' "$out" >> "$out.fail"
   if [ -n "$ERR_FAIL_PATTERN" ]; then

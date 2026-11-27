@@ -99,6 +99,7 @@ left out and why (known bugs), and how to add them back.
 | `GRAMMAR_WEIGHT` | 1000 | weight of grammar lines against pstress's own DML (~2600) |
 | `LIFECYCLE_GRAMMAR` | per conf | grammar for the INSTALL/UNINSTALL workers beside pstress |
 | `CHECK_SQL` | per conf | SQL run after every restart |
+| `CHECK_TIMEOUT` | 300 | seconds CHECK_SQL may take before it is a finding |
 | `ERR_FAIL_PATTERN` | per conf | error log lines matching this regex are findings |
 | `MYEXTRA` | per conf | extra mysqld options |
 | `PSTRESS_EXTRA` | | extra pstress options |
