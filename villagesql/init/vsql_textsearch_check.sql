@@ -1,6 +1,6 @@
 -- Run by vsql-loop.sh after every restart (CHECK_SQL), before any new DML.
 -- Lines starting with FAIL, and any error, are findings; INFO lines go to the
--- loop log.
+-- loop log; DUMP lines are only kept in the finding.
 --
 -- Runs p_tx_chk (init/vsql_textsearch_init.sql) on every table: ranked reads
 -- of random queries with and without a limit and a filter, locking reads
@@ -38,15 +38,31 @@ CALL vsql.p_tx_words('tx4');
 CALL vsql.p_tx_words('tx5');
 CALL vsql.p_tx_chk6();
 
+-- Reading INFORMATION_SCHEMA.INNODB_TABLES can load the index of a table, so
+-- take bm25_indexes() before anything reads it.
+SET @p_tx_bm25 = bm25_indexes();
+
 -- Every index was opened by the reads above. It must have the
 -- memtable_docs and segments_per_level of its CREATE INDEX after a restart.
 SELECT CONCAT('FAIL bm25 settings of ', x.t, ': memtable_docs ', x.memtable_docs, ' segments_per_level ',
               x.segments_per_level, ', created with ', o.memtable_docs, ' and ', o.segments_per_level)
   FROM vsql.tx_idx x JOIN vsql.tx_opt o ON o.t = x.t
   WHERE x.memtable_docs <> o.memtable_docs OR x.segments_per_level <> o.segments_per_level;
+
+-- When an index is missing, dump the snapshot and the space of every table
+-- into the finding, to tell an index that was not opened from one whose space
+-- matches no table.
+SET @p_tx_missing = (SELECT GROUP_CONCAT(o.t ORDER BY o.t) FROM vsql.tx_opt o
+                      WHERE o.t <> 'tx6' AND NOT EXISTS (
+                        SELECT 1 FROM JSON_TABLE(@p_tx_bm25, '$[*]' COLUMNS (space INT PATH '$.space')) j
+                          JOIN INFORMATION_SCHEMA.INNODB_TABLES it ON it.SPACE = j.space
+                         WHERE it.NAME = CONCAT('vsql/', o.t)));
 SELECT CONCAT('FAIL bm25 index of ', o.t, ' not loaded after its reads')
-  FROM vsql.tx_opt o
-  WHERE o.t <> 'tx6' AND NOT EXISTS (SELECT 1 FROM vsql.tx_idx x WHERE x.t = o.t);
+  FROM vsql.tx_opt o WHERE FIND_IN_SET(o.t, @p_tx_missing);
+SELECT CONCAT('DUMP bm25_indexes ', @p_tx_bm25) FROM DUAL WHERE @p_tx_missing IS NOT NULL;
+SELECT CONCAT('DUMP innodb_tables ', NAME, ' space ', SPACE)
+  FROM INFORMATION_SCHEMA.INNODB_TABLES
+  WHERE @p_tx_missing IS NOT NULL AND NAME LIKE 'vsql/tx%' ORDER BY NAME;
 
 -- The segments of each index: level:docs/live, newest last.
 SELECT CONCAT('INFO bm25 ', SUBSTRING_INDEX(MAX(it.NAME), '/', -1), ' live ', MAX(j.live), ' memtable ',
@@ -88,9 +104,6 @@ SELECT CONCAT('INFO p_tx_chk: ', SUM(src = 'chk'), ' reads, ', SUM(src = 'lchk')
               SUM(full_cmp AND src = 'lchk'), ' full), ', SUM(src = 'snap'), ' snapshots, ',
               IFNULL(SUM(dups > 0 OR NOT ordered OR extra > 0 OR missing <> 0 OR bad_text > 0), 0), ' mismatches')
   FROM vsql.tx_chk WHERE seen = 0;
-
-SELECT CONCAT('INFO p_tx_pick read txt as a binary string ', COUNT(*), ' times')
-  FROM vsql.tx_log WHERE src = 'binary txt' HAVING COUNT(*) > 0;
 
 UPDATE vsql.tx_chk SET seen = 1 WHERE seen = 0;
 DELETE FROM vsql.tx_chk WHERE seen = 1 AND id < (SELECT m FROM (SELECT MAX(id) - 100000 AS m FROM vsql.tx_chk) x);

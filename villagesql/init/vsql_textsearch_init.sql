@@ -233,11 +233,10 @@ BEGIN
   PREPARE p_tx_s FROM @s;
   EXECUTE p_tx_s USING @p_tx_lo;
   DEALLOCATE PREPARE p_tx_s;
-  -- doc takes only character strings. Old text that arrives as a binary
-  -- string is logged, to find out where that comes from, and converted.
-  IF CHARSET(@p_tx_old) = 'binary' THEN
-    INSERT INTO vsql.tx_log (src, ref) VALUES ('binary txt', @p_tx_id);
-  END IF;
+  -- A user variable first created by SET @v = NULL is a binary string, and
+  -- SELECT ... INTO keeps that type for a NULL txt. pstress --reconnect clears
+  -- user variables, so this happens in its sessions. doc takes only character
+  -- strings, and CONCAT(IFNULL(@p_tx_old, ''), ...) would be binary.
   SET @p_tx_old = CONVERT(@p_tx_old USING utf8mb4);
 END//
 
